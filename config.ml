@@ -12,8 +12,8 @@ let primary_stack = direct_stackv4_with_dhcp default_console primary_netif
 let secondary_stack = direct_stackv4_with_dhcp default_console secondary_netif
 
 let () = 
-  add_to_opam_packages ["ocaml-nat"];
-  add_to_ocamlfind_libraries ["mirage_nat"; "tcpip.ethif"];
+  add_to_opam_packages ["ocaml-nat";"tcpip"];
+  add_to_ocamlfind_libraries ["mirage_nat"; "tcpip.ethif" ];
   register "simple_nat" [
     main $ default_console $ primary_netif $ secondary_netif 
   ]
