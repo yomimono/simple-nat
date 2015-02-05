@@ -1,10 +1,15 @@
 open V1_LWT
 open Lwt
 
+(* TODO: be passed configured stacks for pri/sec *)
 module Main (C: V1_LWT.CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
   module ETH = Ethif.Make(PRI) 
   type direction = | Source | Destination
+
+  (* TODO this should be the ip address of the "internal" interface, but for now,
+     hardcode it to something credible *)
+  let internal_ip = (Ipaddr.of_string_exn "192.168.3.99") 
 
       (* construct tcp/udp modules from functors once we know whether we need
         ipv4 or ipv6 *)
@@ -16,8 +21,10 @@ module Main (C: V1_LWT.CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
   let table () = 
     let open Lookup in
-    insert (empty ()) 6 (Ipaddr.of_string_exn "192.168.3.99", 6767) 
-      (Ipaddr.of_string_exn "10.54.67.199", 6767)
+    match insert (empty ()) 6 (Ipaddr.of_string_exn "10.0.0.2", 80) 
+            (Ipaddr.of_string_exn "192.168.3.1", 52966)(internal_ip, 9999) with
+    | None -> raise (Failure "Couldn't create hardcoded NAT table")
+    | Some t -> t
 
   let listen nf push =
     (* ingest packets *)
@@ -28,7 +35,7 @@ module Main (C: V1_LWT.CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
   let shovel c nf table direction in_queue out_push =
     let frame_wrapper frame =
-      match (Rewrite.translate table direction frame) with
+      match (Rewrite.translate table internal_ip direction frame) with
       | Some f -> 
         MProf.Counter.increase c 1;
         return (out_push (Some f)) 
