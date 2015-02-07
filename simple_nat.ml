@@ -8,6 +8,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
   type direction = | Source | Destination
 
   (* TODO: should probably use config.ml stack configuration stuff instead *)
+  (* TODO: icmp crashes the unikernel, which is not optimal *)
   let external_ip = (Ipaddr.of_string_exn "192.168.3.99") 
   let external_netmask = (Ipaddr.V4.of_string_exn "255.255.255.0")
   let internal_ip = (Ipaddr.V4.of_string_exn "10.0.0.1")
@@ -37,7 +38,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
   let shovel c nf table direction in_queue out_push =
     (* shovel also, unfortunately, needs to look for arp packets *)
     let frame_wrapper frame =
-      match (Rewrite.translate table external_ip direction frame) with
+      match (Rewrite.translate table direction frame) with
       | Some f -> 
         MProf.Counter.increase c 1;
         return (out_push (Some f)) 
