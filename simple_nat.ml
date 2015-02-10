@@ -69,22 +69,21 @@ let send_packets c nf i out_queue =
     in
     let just_headers = Cstruct.sub frame 0 (Wire_structs.sizeof_ethernet +
                                             ipv4_frame_size) in
-    match Wire_structs.get_ipv4_proto ip_layer with
-    | 17 -> 
-      (* TODO: we shouldn't need to redo this here *)
-      let claimed_checksum = Wire_structs.get_udp_checksum higherlevel_data in
+    let fix_checksum set_checksum ip_layer higherlevel_data =
       (* reset checksum to 0 for recalculation *)
-      Wire_structs.set_udp_checksum higherlevel_data 0;
+      set_checksum higherlevel_data 0;
       let actual_checksum = I.checksum just_headers (higherlevel_data ::
                                                      []) in
-      (* the other checksum is dumb; let's put the one we recalculated in
-         there *)
-      Wire_structs.set_udp_checksum higherlevel_data actual_checksum;
-      I.writev i just_headers [  higherlevel_data ] >>= fun () -> return_unit
+      set_checksum higherlevel_data actual_checksum
+    in
+    let () = match Wire_structs.get_ipv4_proto ip_layer with
+    | 17 -> 
+      fix_checksum Wire_structs.set_udp_checksum ip_layer higherlevel_data
     | 6 -> 
-      I.writev i just_headers [  higherlevel_data ] >>= fun () -> return_unit
-    | _ ->
-      I.writev i just_headers [  higherlevel_data ] >>= fun () -> return_unit
+      fix_checksum Wire_structs.Tcp_wire.set_tcp_checksum ip_layer higherlevel_data
+    | _ -> ()
+    in
+    I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
   done
 
 let start c pri sec =
