@@ -59,6 +59,7 @@ let send_packets c nf i out_queue =
     lwt frame = Lwt_stream.next out_queue in
     (* TODO: we're assuming this is ipv4 which is obviously not necessarily correct
     *)
+
     let new_smac = Macaddr.to_bytes (ETH.mac nf) in
     Wire_structs.set_ethernet_src new_smac 0 frame;
     let ip_layer = Cstruct.shift frame (Wire_structs.sizeof_ethernet) in
