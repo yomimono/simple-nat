@@ -22,10 +22,16 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
   let table () = 
     let open Lookup in
+    (* TODO: rewrite as a bind *)
     match insert (empty ()) 6 (Ipaddr.of_string_exn "10.0.0.2", 80) 
             (Ipaddr.of_string_exn "192.168.3.1", 52966)(external_ip, 9999) with
     | None -> raise (Failure "Couldn't create hardcoded NAT table")
-    | Some t -> t
+    | Some t -> 
+      match insert t 17 (Ipaddr.of_string_exn "10.0.0.2", 53)
+              (Ipaddr.of_string_exn "192.168.3.1", 52966)
+              (external_ip, 9999) with
+      | None -> raise (Failure "Couldn't create hardcoded NAT table")
+      | Some t -> t
 
   let listen nf i push =
     (* ingest packets *)
@@ -36,23 +42,50 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
          | _ -> return (push (Some frame)))
 
   let shovel c nf table direction in_queue out_push =
-    (* shovel also, unfortunately, needs to look for arp packets *)
     let frame_wrapper frame =
       match (Rewrite.translate table direction frame) with
       | Some f -> 
         MProf.Counter.increase c 1;
         return (out_push (Some f)) 
-      | None -> return_unit
+      | None -> 
+        return_unit
     in
     while_lwt true do
       Lwt_stream.next in_queue >>= frame_wrapper
     done
 
-let send_packets c nf out_queue =
-    while_lwt true do
-  lwt frame = Lwt_stream.next out_queue in
-      ETH.write nf frame
-    done
+let send_packets c nf i out_queue =
+  while_lwt true do
+    lwt frame = Lwt_stream.next out_queue in
+    (* TODO: we're assuming this is ipv4 which is obviously not necessarily correct
+    *)
+    let new_smac = Macaddr.to_bytes (ETH.mac nf) in
+    Wire_structs.set_ethernet_src new_smac 0 frame;
+    let ip_layer = Cstruct.shift frame (Wire_structs.sizeof_ethernet) in
+    let ipv4_frame_size = (Wire_structs.get_ipv4_hlen_version ip_layer land 0x0f) * 4 in
+    let higherlevel_data = 
+      Cstruct.sub frame (Wire_structs.sizeof_ethernet + ipv4_frame_size)
+      (Cstruct.len frame - (Wire_structs.sizeof_ethernet + ipv4_frame_size))
+    in
+    let just_headers = Cstruct.sub frame 0 (Wire_structs.sizeof_ethernet +
+                                            ipv4_frame_size) in
+    match Wire_structs.get_ipv4_proto ip_layer with
+    | 17 -> 
+      (* TODO: we shouldn't need to redo this here *)
+      let claimed_checksum = Wire_structs.get_udp_checksum higherlevel_data in
+      (* reset checksum to 0 for recalculation *)
+      Wire_structs.set_udp_checksum higherlevel_data 0;
+      let actual_checksum = I.checksum just_headers (higherlevel_data ::
+                                                     []) in
+      (* the other checksum is dumb; let's put the one we recalculated in
+         there *)
+      Wire_structs.set_udp_checksum higherlevel_data actual_checksum;
+      I.writev i just_headers [  higherlevel_data ] >>= fun () -> return_unit
+    | 6 -> 
+      I.writev i just_headers [  higherlevel_data ] >>= fun () -> return_unit
+    | _ ->
+      I.writev i just_headers [  higherlevel_data ] >>= fun () -> return_unit
+  done
 
 let start c pri sec =
 
@@ -84,7 +117,6 @@ let start c pri sec =
   (* set up ipv4 on interfaces so ARP will be answered *)
   lwt ext_i = or_error c "ip for primary interface" I.connect nf1 in
 lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
-(* TODO: lwt blah = thing in for all *)
   I.set_ip ext_i (to_v4_exn external_ip) >>= fun () ->
   I.set_ip_netmask ext_i external_netmask >>= fun () ->
   I.set_ip int_i internal_ip >>= fun () ->
@@ -106,8 +138,8 @@ let translated_packets = MProf.Counter.make "forwarded packets" in
     (shovel translated_packets nf2 t Source sec_in_queue pri_out_push);
 
     (* packet output *)
-    (send_packets c nf1 pri_out_queue); 
-    (send_packets c nf2 sec_out_queue)
+    (send_packets c nf1 ext_i pri_out_queue); 
+    (send_packets c nf2 int_i sec_out_queue)
   ]
 
 end
