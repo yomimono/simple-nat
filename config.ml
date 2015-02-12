@@ -8,12 +8,12 @@ into a string, which maps to a device ID number assigned by Xen, to do anything
 helpful when xen is the target.  Stuff that can't be turned into an int
 is silently dropped in that case and we just get the first Xen network iface. *)
 
-(* let tracing = mprof_trace ~size:100000 () *)
+let tracing = mprof_trace ~size:100000 ()
 
 let () = 
   add_to_opam_packages ["ocaml-nat";"tcpip";"mirage-profile"];
   add_to_ocamlfind_libraries ["mirage_nat";
                               "tcpip.ethif";"tcpip.ipv4";"mirage-profile"];
-  register "simple_nat" (* ~tracing *) [
+  register "simple_nat" ~tracing [
     main $ default_console $ primary_netif $ secondary_netif 
   ]
