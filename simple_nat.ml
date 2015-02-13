@@ -67,7 +67,8 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
       match direction, (Rewrite.translate table direction frame) with
-      | Destination, None -> return_unit
+      | Destination, None -> 
+      return_unit
       | _, Some f -> 
         MProf.Counter.increase matches 1;
         return (out_push (Some f)) 
@@ -171,8 +172,11 @@ let nat = shovel xl_counter unparseable entries in
     (listen nf2 int_i sec_in_push); 
     
     (* address translation *)
+    (* for packets received on the first interface (xenbr0/br0 in examples, which is an "external" world-facing interface), rewrite destination addresses  *)
     (nat nf1 external_ip t Destination pri_in_queue sec_out_push);
-    (nat nf2 (V4 internal_ip) t Source sec_in_queue pri_out_push);
+
+    (* for packets received on xenbr1 ("internal"), rewrite source address *)
+    (nat nf2 external_ip t Source sec_in_queue pri_out_push);
 
     (* packet output *)
     (send_packets c nf1 ext_i pri_out_queue); 
