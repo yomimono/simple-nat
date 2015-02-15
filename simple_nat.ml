@@ -1,5 +1,6 @@
 open V1_LWT
 open Lwt
+open Rewrite
 
 module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
