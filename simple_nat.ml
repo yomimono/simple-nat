@@ -6,21 +6,25 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
   module ETH = Ethif.Make(PRI) 
   module I = Ipv4.Make(ETH)
+  module T = OS.Time (* the fact that I know this is OS.Time, and not just some
+                        V1_LWT Time implementation, lets me take some liberties *)
+               (* this probably actually *should* come from `config.ml` by way
+                  of `mirage configure`, though *)
+               (* under what circumstances would we want to use a different
+                 `time impl`?  I guess if we don't trust dom0, but it's hard to
+                  imagine overcoming that with any particular alternative; even
+                  a passthrough to an independent clock is a passthrough via 
+                  dom0 *)
   type direction = Rewrite.direction
 
   (* TODO: should probably use config.ml stack configuration stuff instead *)
-  (* TODO: icmp crashes the unikernel, which is not optimal *)
   let external_ip = (Ipaddr.of_string_exn "192.168.3.99") 
   let external_netmask = (Ipaddr.V4.of_string_exn "255.255.255.0")
   let internal_ip = (Ipaddr.V4.of_string_exn "10.0.0.1")
   let internal_netmask = (Ipaddr.V4.of_string_exn "255.255.255.0")
   let external_gateway = (Ipaddr.V4.of_string_exn "192.168.3.1") 
 
-  (* what level of thing does this need to take?  it needs access to ip and
-     udp/tcp headers. *)
-  (* at ethif level we can write our own ingestors for ipv4, ipv6; use them
-     to rewrite at least ip headers, spit them out the other interface *)
-
+  (* TODO: provide hooks for updates to/dump of this *)
   let table () = 
     let open Lookup in
     (* TODO: rewrite as a bind *)
@@ -59,6 +63,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
         | Overlap -> 
           stubborn_insert table frame ip (Random.int 65535)
     in
+    (* TODO: connection tracking logic *)
     stubborn_insert table frame ip (Random.int 65535)
 
   let shovel matches unparseables inserts nf ip table (direction : direction) 
@@ -71,6 +76,16 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
       | Destination, None -> 
       return_unit
       | _, Some f -> 
+        (* TODO: connection teardown if necessary, e.g. TCP RST *)
+        (* there must be some bounds on which TCP RSTs are accepted; otherwise
+          source-spoofed TCP RSTs would be running around in the Internet all
+          the time, although I suppose you'd have to get pretty lucky to hit a
+          source IP that actually maps to sth your target is using.  Less so if
+           you have some knowledge about the connection, of course, and risk is
+           increased for long-lived TCP connections. *)
+        (* It looks like the state machine is a functor over time, which we
+          haven't requested in this unikernel but are obviously going to need
+          ourselves for any kind of timeout logic. *)
         MProf.Counter.increase matches 1;
         return (out_push (Some f)) 
       | Source, None -> 
@@ -158,7 +173,7 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
   I.set_ip_netmask int_i internal_netmask >>= fun () ->
   I.set_ip_gateways ext_i [ external_gateway ] >>= fun () -> ();
 
-  (* initialize hardwired lookup table *)
+  (* initialize hardwired lookup table (i.e., "port forwarding") *)
 let t = table () in
 
 let xl_counter = MProf.Counter.make "forwarded packets" in
@@ -171,12 +186,18 @@ let nat = shovel xl_counter unparseable entries in
     (* packet intake *)
     (listen nf1 ext_i pri_in_push);
     (listen nf2 int_i sec_in_push); 
+
+    (* TODO: ICMP, at least on our own behalf *)
     
     (* address translation *)
-    (* for packets received on the first interface (xenbr0/br0 in examples, which is an "external" world-facing interface), rewrite destination addresses  *)
+    (* for packets received on the first interface (xenbr0/br0 in examples, 
+       which is an "external" world-facing interface), 
+       rewrite destination addresses/ports before sending packet out the second
+       interface *)
     (nat nf1 external_ip t Destination pri_in_queue sec_out_push);
 
-    (* for packets received on xenbr1 ("internal"), rewrite source address *)
+    (* for packets received on xenbr1 ("internal"), rewrite source address/port 
+       before sending packets out the primary interface *)
     (nat nf2 external_ip t Source sec_in_queue pri_out_push);
 
     (* packet output *)
