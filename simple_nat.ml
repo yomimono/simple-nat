@@ -24,12 +24,12 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
     let open Lookup in
     (* TODO: rewrite as a bind *)
     match insert (empty ()) 6 (Ipaddr.of_string_exn "10.0.0.2", 80) 
-            (Ipaddr.of_string_exn "192.168.3.1", 52966)(external_ip, 9999) with
+            (Ipaddr.of_string_exn "192.168.3.1", 52966)(external_ip, 9999) Active with
     | None -> raise (Failure "Couldn't create hardcoded NAT table")
     | Some t -> 
       match insert t 17 (Ipaddr.of_string_exn "10.0.0.2", 53)
               (Ipaddr.of_string_exn "192.168.3.1", 52966)
-              (external_ip, 9999) with
+              (external_ip, 9999) Active with
       | None -> raise (Failure "Couldn't create hardcoded NAT table")
       | Some t -> t
 
@@ -41,7 +41,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
          | 0x0806 -> I.input_arpv4 i frame
          | _ -> return (push (Some frame)))
 
-  let allow_traffic (table : Lookup.table) frame ip =
+  let allow_traffic (table : Lookup.t) frame ip =
     let rec stubborn_insert table frame ip port = match port with
       (* TODO: in the unlikely event that no port is available, this
          function will never terminate *)
@@ -51,7 +51,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
       | n when n < 1024 -> 
         stubborn_insert table frame ip (Random.int 65535)
       | n -> 
-        match Rewrite.make_entry table frame ip n with
+        match Rewrite.make_entry table frame ip n Active with
         | Ok t -> Some t
         | Unparseable -> 
           None
