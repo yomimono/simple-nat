@@ -17,27 +17,6 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
                   dom0 *)
   type direction = Rewrite.direction
 
-  (* TODO: should probably use config.ml stack configuration stuff instead *)
-  let external_ip = (Ipaddr.of_string_exn "192.168.3.99") 
-  let external_netmask = (Ipaddr.V4.of_string_exn "255.255.255.0")
-  let internal_ip = (Ipaddr.V4.of_string_exn "10.0.0.1")
-  let internal_netmask = (Ipaddr.V4.of_string_exn "255.255.255.0")
-  let external_gateway = (Ipaddr.V4.of_string_exn "192.168.3.1") 
-
-  (* TODO: provide hooks for updates to/dump of this *)
-  let table () = 
-    let open Lookup in
-    (* TODO: rewrite as a bind *)
-    match insert (empty ()) 6 (Ipaddr.of_string_exn "10.0.0.2", 80) 
-            (Ipaddr.of_string_exn "192.168.3.1", 52966)(external_ip, 9999) Active with
-    | None -> raise (Failure "Couldn't create hardcoded NAT table")
-    | Some t -> 
-      match insert t 17 (Ipaddr.of_string_exn "10.0.0.2", 53)
-              (Ipaddr.of_string_exn "192.168.3.1", 52966)
-              (external_ip, 9999) Active with
-      | None -> raise (Failure "Couldn't create hardcoded NAT table")
-      | Some t -> t
-
   let listen nf i push =
     (* ingest packets *)
     PRI.listen (ETH.id nf) 
@@ -160,6 +139,18 @@ let start c pri sec =
     | Some i -> i
   in
 
+  (* get network configuration from bootvars *)
+  Bootvar.create >>= fun bootvar ->
+  let try_bootvar key = Ipaddr.V4.of_string_exn (Bootvar.get bootvar key) in
+  let internal_ip = try_bootvar "internal_ip" in
+  let internal_netmask = try_bootvar "internal_netmask" in
+  let external_ip = try_bootvar "external_ip" in
+  let external_netmask = try_bootvar "external_netmask" in
+  let external_gateway = try_bootvar "external_gateway" in
+  let next_hop_ip = try_bootvar "dest_ip" in
+  let intercept_port = int_of_string (Bootvar.get bootvar "dest_port") in 
+  (* TODO: this might be a list *)
+
   (* initialize interfaces *)
   lwt nf1 = or_error c "primary interface" ETH.connect pri in
   lwt nf2 = or_error c "secondary interface" ETH.connect sec in
@@ -167,13 +158,25 @@ let start c pri sec =
   (* set up ipv4 on interfaces so ARP will be answered *)
   lwt ext_i = or_error c "ip for primary interface" I.connect nf1 in
 lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
-  I.set_ip ext_i (to_v4_exn external_ip) >>= fun () ->
+  I.set_ip ext_i external_ip >>= fun () ->
   I.set_ip_netmask ext_i external_netmask >>= fun () ->
   I.set_ip int_i internal_ip >>= fun () ->
   I.set_ip_netmask int_i internal_netmask >>= fun () ->
   I.set_ip_gateways ext_i [ external_gateway ] >>= fun () -> ();
 
   (* initialize hardwired lookup table (i.e., "port forwarding") *)
+
+  (* TODO: provide hooks for updates to/dump of this *)
+  let table () = 
+    let open Lookup in
+    (* TODO: rewrite as a bind *)
+    match insert (empty ()) 6 ((V4 next_hop_ip), intercept_port) 
+            (Ipaddr.of_string_exn "192.168.3.1", 52966)
+            ((V4 external_ip), 9999) Active with
+    | None -> raise (Failure "Couldn't create hardcoded NAT table")
+    | Some t -> t
+  in
+
 let t = table () in
 
 let xl_counter = MProf.Counter.make "forwarded packets" in
@@ -194,11 +197,11 @@ let nat = shovel xl_counter unparseable entries in
        which is an "external" world-facing interface), 
        rewrite destination addresses/ports before sending packet out the second
        interface *)
-    (nat nf1 external_ip t Destination pri_in_queue sec_out_push);
+    (nat nf1 (V4 external_ip) t Destination pri_in_queue sec_out_push);
 
     (* for packets received on xenbr1 ("internal"), rewrite source address/port 
        before sending packets out the primary interface *)
-    (nat nf2 external_ip t Source sec_in_queue pri_out_push);
+    (nat nf2 (V4 external_ip) t Source sec_in_queue pri_out_push);
 
     (* packet output *)
     (send_packets c nf1 ext_i pri_out_queue); 
