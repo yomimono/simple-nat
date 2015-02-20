@@ -1,6 +1,6 @@
 open V1_LWT
 open Lwt
-open Rewrite
+open Nat_rewrite
 
 module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
@@ -15,7 +15,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
                   imagine overcoming that with any particular alternative; even
                   a passthrough to an independent clock is a passthrough via 
                   dom0 *)
-  type direction = Rewrite.direction
+  type direction = Nat_rewrite.direction
 
   let listen nf i push =
     (* ingest packets *)
@@ -25,7 +25,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
          | 0x0806 -> I.input_arpv4 i frame
          | _ -> return (push (Some frame)))
 
-  let allow_traffic (table : Lookup.t) frame ip =
+  let allow_traffic table frame ip =
     let rec stubborn_insert table frame ip port = match port with
       (* TODO: in the unlikely event that no port is available, this
          function will never terminate *)
@@ -35,8 +35,8 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
       | n when n < 1024 -> 
         stubborn_insert table frame ip (Random.int 65535)
       | n -> 
-        match Rewrite.make_entry table frame ip n Active with
-        | Ok t -> Some t
+        match Nat_rewrite.make_entry table frame ip n with
+        | Ok t -> Printf.printf "added an entry for :\n"; Cstruct.hexdump frame; Some t
         | Unparseable -> 
           None
         | Overlap -> 
@@ -45,31 +45,45 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
     (* TODO: connection tracking logic *)
     stubborn_insert table frame ip (Random.int 65535)
 
-  let shovel matches unparseables inserts nf ip table (direction : direction) 
+  let shovel matches unparseables inserts nf ip fwd_dport internal_client 
+      nat_table (direction : direction) 
       in_queue out_push =
     let rec frame_wrapper frame =
       (* typical NAT logic: traffic from the internal "trusted" interface gets
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
-      match direction, (Rewrite.translate table direction frame) with
-      | Destination, None -> 
-      return_unit
+      match direction, (Nat_rewrite.translate nat_table direction frame) with
+      | Destination, None ->  (* (
+        (* if this isn't return traffic from an outgoing request, check to see
+           whether it's traffic we know we should forward on to internal_client
+           because of preconfigured port forward mappings 
+          *)
+        match Nat_rewrite.((ips_of_frame frame), (ports_of_frame frame),
+                       (proto_of_frame frame), (layers frame)) with
+        | Some (src, dst), Some (sport, dport), Some proto, Some (f, ip_layer, tx_layer)
+          when (dst = ip && dport = fwd_dport) -> (
+            Printf.printf "setting up an entry %s, %d, %s, %d -> %s, %d\n" 
+              (Ipaddr.to_string internal_client) dport (Ipaddr.to_string src) sport
+              (Ipaddr.to_string ip) dport;
+          (* add an entry as if our client had requested something from the
+             remote hosts sport, on its own dport *)
+            match Nat_lookup.insert nat_table proto (internal_client, dport) (src, sport)
+                    (ip, dport) with
+            | None -> Printf.printf "insertion failed"; return_unit
+            | Some nat_table ->
+              match Nat_rewrite.translate nat_table direction frame with 
+              | Some f -> Printf.printf "got it"; return (out_push (Some f))
+              | None -> Printf.printf "couldn't translate after entry added";
+                return_unit
+          )
+        | _, _, _, _ -> return_unit
+        ) *) return_unit
       | _, Some f -> 
-        (* TODO: connection teardown if necessary, e.g. TCP RST *)
-        (* there must be some bounds on which TCP RSTs are accepted; otherwise
-          source-spoofed TCP RSTs would be running around in the Internet all
-          the time, although I suppose you'd have to get pretty lucky to hit a
-          source IP that actually maps to sth your target is using.  Less so if
-           you have some knowledge about the connection, of course, and risk is
-           increased for long-lived TCP connections. *)
-        (* It looks like the state machine is a functor over time, which we
-          haven't requested in this unikernel but are obviously going to need
-          ourselves for any kind of timeout logic. *)
         MProf.Counter.increase matches 1;
         return (out_push (Some f)) 
       | Source, None -> 
-        (* mutate table to include entries for the frame *)
-        match allow_traffic table frame ip with
+        (* mutate nat_table to include entries for the frame *)
+        match allow_traffic nat_table frame ip with
         | Some t ->
           (* try rewriting again; we should now have an entry for this packet *)
           MProf.Counter.increase inserts 1;
@@ -147,6 +161,7 @@ let start c pri sec =
   let external_ip = try_bootvar "external_ip" in
   let external_netmask = try_bootvar "external_netmask" in
   let external_gateway = try_bootvar "external_gateway" in
+  let internal_client = try_bootvar "internal_client" in
   let next_hop_ip = try_bootvar "dest_ip" in
   let intercept_port = int_of_string (Bootvar.get bootvar "dest_port") in 
   (* TODO: this might be a list *)
@@ -168,22 +183,22 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
 
   (* TODO: provide hooks for updates to/dump of this *)
   let table () = 
-    let open Lookup in
-    (* TODO: rewrite as a bind *)
-    match insert (empty ()) 6 ((V4 next_hop_ip), intercept_port) 
+    let open Nat_lookup in
+    match insert (empty ()) 6 
+            (Ipaddr.of_string_exn "10.0.0.2", 80)
             (Ipaddr.of_string_exn "192.168.3.1", 52966)
-            ((V4 external_ip), 9999) Active with
+            ((V4 external_ip), 9999) with
     | None -> raise (Failure "Couldn't create hardcoded NAT table")
     | Some t -> t
   in
 
-let t = table () in
+  let nat_t = table () in
 
-let xl_counter = MProf.Counter.make "forwarded packets" in
-let unparseable = MProf.Counter.make "unparseable packets" in
-let entries = MProf.Counter.make "table entries added" in
+  let xl_counter = MProf.Counter.make "forwarded packets" in
+  let unparseable = MProf.Counter.make "unparseable packets" in
+  let entries = MProf.Counter.make "table entries added" in
 
-let nat = shovel xl_counter unparseable entries in
+  let nat = shovel xl_counter unparseable entries in
  
   Lwt.choose [
     (* packet intake *)
@@ -197,11 +212,13 @@ let nat = shovel xl_counter unparseable entries in
        which is an "external" world-facing interface), 
        rewrite destination addresses/ports before sending packet out the second
        interface *)
-    (nat nf1 (V4 external_ip) t Destination pri_in_queue sec_out_push);
+    (nat nf1 (V4 external_ip) intercept_port (Ipaddr.V4 internal_client) nat_t 
+       Destination pri_in_queue sec_out_push);
 
     (* for packets received on xenbr1 ("internal"), rewrite source address/port 
        before sending packets out the primary interface *)
-    (nat nf2 (V4 external_ip) t Source sec_in_queue pri_out_push);
+    (nat nf2 (V4 external_ip) intercept_port (V4 internal_client) nat_t 
+       Source sec_in_queue pri_out_push);
 
     (* packet output *)
     (send_packets c nf1 ext_i pri_out_queue); 
