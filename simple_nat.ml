@@ -1,37 +1,21 @@
 open V1_LWT
 open Lwt
+open Nat_rewrite
 
 module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
   module ETH = Ethif.Make(PRI) 
   module I = Ipv4.Make(ETH)
-  type direction = Rewrite.direction
-
-  (* TODO: should probably use config.ml stack configuration stuff instead *)
-  (* TODO: icmp crashes the unikernel, which is not optimal *)
-  let external_ip = (Ipaddr.of_string_exn "192.168.3.99") 
-  let external_netmask = (Ipaddr.V4.of_string_exn "255.255.255.0")
-  let internal_ip = (Ipaddr.V4.of_string_exn "10.0.0.1")
-  let internal_netmask = (Ipaddr.V4.of_string_exn "255.255.255.0")
-  let external_gateway = (Ipaddr.V4.of_string_exn "192.168.3.1") 
-
-  (* what level of thing does this need to take?  it needs access to ip and
-     udp/tcp headers. *)
-  (* at ethif level we can write our own ingestors for ipv4, ipv6; use them
-     to rewrite at least ip headers, spit them out the other interface *)
-
-  let table () = 
-    let open Lookup in
-    (* TODO: rewrite as a bind *)
-    match insert (empty ()) 6 (Ipaddr.of_string_exn "10.0.0.2", 80) 
-            (Ipaddr.of_string_exn "192.168.3.1", 52966)(external_ip, 9999) Active with
-    | None -> raise (Failure "Couldn't create hardcoded NAT table")
-    | Some t -> 
-      match insert t 17 (Ipaddr.of_string_exn "10.0.0.2", 53)
-              (Ipaddr.of_string_exn "192.168.3.1", 52966)
-              (external_ip, 9999) Active with
-      | None -> raise (Failure "Couldn't create hardcoded NAT table")
-      | Some t -> t
+  module T = OS.Time (* the fact that I know this is OS.Time, and not just some
+                        V1_LWT Time implementation, lets me take some liberties *)
+               (* this probably actually *should* come from `config.ml` by way
+                  of `mirage configure`, though *)
+               (* under what circumstances would we want to use a different
+                 `time impl`?  I guess if we don't trust dom0, but it's hard to
+                  imagine overcoming that with any particular alternative; even
+                  a passthrough to an independent clock is a passthrough via 
+                  dom0 *)
+  type direction = Nat_rewrite.direction
 
   let listen nf i push =
     (* ingest packets *)
@@ -41,7 +25,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
          | 0x0806 -> I.input_arpv4 i frame
          | _ -> return (push (Some frame)))
 
-  let allow_traffic (table : Lookup.t) frame ip =
+  let allow_traffic table frame ip =
     let rec stubborn_insert table frame ip port = match port with
       (* TODO: in the unlikely event that no port is available, this
          function will never terminate *)
@@ -51,30 +35,55 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
       | n when n < 1024 -> 
         stubborn_insert table frame ip (Random.int 65535)
       | n -> 
-        match Rewrite.make_entry table frame ip n Active with
-        | Ok t -> Some t
+        match Nat_rewrite.make_entry table frame ip n with
+        | Ok t -> Printf.printf "added an entry for :\n"; Cstruct.hexdump frame; Some t
         | Unparseable -> 
           None
         | Overlap -> 
           stubborn_insert table frame ip (Random.int 65535)
     in
+    (* TODO: connection tracking logic *)
     stubborn_insert table frame ip (Random.int 65535)
 
-  let shovel matches unparseables inserts nf ip table (direction : direction) 
+  let shovel matches unparseables inserts nf ip fwd_dport internal_client 
+      nat_table (direction : direction) 
       in_queue out_push =
     let rec frame_wrapper frame =
       (* typical NAT logic: traffic from the internal "trusted" interface gets
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
-      match direction, (Rewrite.translate table direction frame) with
-      | Destination, None -> 
-      return_unit
+      match direction, (Nat_rewrite.translate nat_table direction frame) with
+      | Destination, None ->   (
+        (* if this isn't return traffic from an outgoing request, check to see
+           whether it's traffic we know we should forward on to internal_client
+           because of preconfigured port forward mappings 
+          *)
+        match Nat_rewrite.((ips_of_frame frame), (ports_of_frame frame),
+                       (proto_of_frame frame), (layers frame)) with
+        | Some (src, dst), Some (sport, dport), Some proto, Some (f, ip_layer, tx_layer)
+          when (dst = ip && dport = fwd_dport) -> (
+            Printf.printf "setting up an entry %s, %d, %s, %d -> %s, %d\n" 
+              (Ipaddr.to_string internal_client) dport (Ipaddr.to_string src) sport
+              (Ipaddr.to_string ip) dport;
+          (* add an entry as if our client had requested something from the
+             remote hosts sport, on its own dport *)
+            match Nat_lookup.insert nat_table proto (internal_client, dport) (src, sport)
+                    (ip, dport) with
+            | None -> Printf.printf "insertion failed"; return_unit
+            | Some nat_table ->
+              match Nat_rewrite.translate nat_table direction frame with 
+              | Some f -> Printf.printf "got it"; return (out_push (Some f))
+              | None -> Printf.printf "couldn't translate after entry added";
+                return_unit
+          )
+        | _, _, _, _ -> return_unit
+        )
       | _, Some f -> 
         MProf.Counter.increase matches 1;
         return (out_push (Some f)) 
       | Source, None -> 
-        (* mutate table to include entries for the frame *)
-        match allow_traffic table frame ip with
+        (* mutate nat_table to include entries for the frame *)
+        match allow_traffic nat_table frame ip with
         | Some t ->
           (* try rewriting again; we should now have an entry for this packet *)
           MProf.Counter.increase inserts 1;
@@ -144,6 +153,19 @@ let start c pri sec =
     | Some i -> i
   in
 
+  (* get network configuration from bootvars *)
+  Bootvar.create >>= fun bootvar ->
+  let try_bootvar key = Ipaddr.V4.of_string_exn (Bootvar.get bootvar key) in
+  let internal_ip = try_bootvar "internal_ip" in
+  let internal_netmask = try_bootvar "internal_netmask" in
+  let external_ip = try_bootvar "external_ip" in
+  let external_netmask = try_bootvar "external_netmask" in
+  let external_gateway = try_bootvar "external_gateway" in
+  let internal_client = try_bootvar "internal_client" in
+  let next_hop_ip = try_bootvar "dest_ip" in
+  let intercept_port = int_of_string (Bootvar.get bootvar "dest_port") in 
+  (* TODO: this might be a list *)
+
   (* initialize interfaces *)
   lwt nf1 = or_error c "primary interface" ETH.connect pri in
   lwt nf2 = or_error c "secondary interface" ETH.connect sec in
@@ -151,32 +173,52 @@ let start c pri sec =
   (* set up ipv4 on interfaces so ARP will be answered *)
   lwt ext_i = or_error c "ip for primary interface" I.connect nf1 in
 lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
-  I.set_ip ext_i (to_v4_exn external_ip) >>= fun () ->
+  I.set_ip ext_i external_ip >>= fun () ->
   I.set_ip_netmask ext_i external_netmask >>= fun () ->
   I.set_ip int_i internal_ip >>= fun () ->
   I.set_ip_netmask int_i internal_netmask >>= fun () ->
   I.set_ip_gateways ext_i [ external_gateway ] >>= fun () -> ();
 
-  (* initialize hardwired lookup table *)
-let t = table () in
+  (* initialize hardwired lookup table (i.e., "port forwarding") *)
 
-let xl_counter = MProf.Counter.make "forwarded packets" in
-let unparseable = MProf.Counter.make "unparseable packets" in
-let entries = MProf.Counter.make "table entries added" in
+  (* TODO: provide hooks for updates to/dump of this *)
+  let table () = 
+    let open Nat_lookup in
+    match insert (empty ()) 6 
+            ((V4 internal_client), intercept_port)
+            (Ipaddr.of_string_exn "192.168.3.1", 52966)
+            ((V4 external_ip), 9999) with
+    | None -> raise (Failure "Couldn't create hardcoded NAT table")
+    | Some t -> t
+  in
 
-let nat = shovel xl_counter unparseable entries in
+  let nat_t = table () in
+
+  let xl_counter = MProf.Counter.make "forwarded packets" in
+  let unparseable = MProf.Counter.make "unparseable packets" in
+  let entries = MProf.Counter.make "table entries added" in
+
+  let nat = shovel xl_counter unparseable entries in
  
   Lwt.choose [
     (* packet intake *)
     (listen nf1 ext_i pri_in_push);
     (listen nf2 int_i sec_in_push); 
+
+    (* TODO: ICMP, at least on our own behalf *)
     
     (* address translation *)
-    (* for packets received on the first interface (xenbr0/br0 in examples, which is an "external" world-facing interface), rewrite destination addresses  *)
-    (nat nf1 external_ip t Destination pri_in_queue sec_out_push);
+    (* for packets received on the first interface (xenbr0/br0 in examples, 
+       which is an "external" world-facing interface), 
+       rewrite destination addresses/ports before sending packet out the second
+       interface *)
+    (nat nf1 (V4 external_ip) intercept_port (Ipaddr.V4 internal_client) nat_t 
+       Destination pri_in_queue sec_out_push);
 
-    (* for packets received on xenbr1 ("internal"), rewrite source address *)
-    (nat nf2 external_ip t Source sec_in_queue pri_out_push);
+    (* for packets received on xenbr1 ("internal"), rewrite source address/port 
+       before sending packets out the primary interface *)
+    (nat nf2 (V4 external_ip) intercept_port (V4 internal_client) nat_t 
+       Source sec_in_queue pri_out_push);
 
     (* packet output *)
     (send_packets c nf1 ext_i pri_out_queue); 
