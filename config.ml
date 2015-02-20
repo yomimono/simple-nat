@@ -11,8 +11,8 @@ is silently dropped in that case and we just get the first Xen network iface. *)
 let tracing = mprof_trace ~size:100000 () *)
 
 let () =
-  add_to_opam_packages ["mirage-nat";"tcpip";"mirage-profile"];
-  add_to_ocamlfind_libraries ["mirage-nat";
+  add_to_opam_packages ["mirage-nat";"re";"tcpip";"mirage-profile"];
+  add_to_ocamlfind_libraries ["mirage-nat";"re.str";
                               "tcpip.ethif";"tcpip.ipv4";"mirage-profile"];
   register "simple-nat" (* ~tracing *) [
     main $ default_console $ primary_netif $ secondary_netif
