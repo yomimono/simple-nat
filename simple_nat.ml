@@ -53,7 +53,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
       match direction, (Nat_rewrite.translate nat_table direction frame) with
-      | Destination, None ->  (* (
+      | Destination, None ->   (
         (* if this isn't return traffic from an outgoing request, check to see
            whether it's traffic we know we should forward on to internal_client
            because of preconfigured port forward mappings 
@@ -77,7 +77,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
                 return_unit
           )
         | _, _, _, _ -> return_unit
-        ) *) return_unit
+        )
       | _, Some f -> 
         MProf.Counter.increase matches 1;
         return (out_push (Some f)) 
@@ -185,7 +185,7 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
   let table () = 
     let open Nat_lookup in
     match insert (empty ()) 6 
-            (Ipaddr.of_string_exn "10.0.0.2", 80)
+            ((V4 internal_client), intercept_port)
             (Ipaddr.of_string_exn "192.168.3.1", 52966)
             ((V4 external_ip), 9999) with
     | None -> raise (Failure "Couldn't create hardcoded NAT table")
