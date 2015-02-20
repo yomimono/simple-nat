@@ -3,30 +3,30 @@ open Lwt
 
 module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
-  module ETH = Ethif.Make(PRI) 
+  module ETH = Ethif.Make(PRI)
   module I = Ipv4.Make(ETH)
   type direction = Rewrite.direction
 
   (* TODO: should probably use config.ml stack configuration stuff instead *)
   (* TODO: icmp crashes the unikernel, which is not optimal *)
-  let external_ip = (Ipaddr.of_string_exn "192.168.3.99") 
+  let external_ip = (Ipaddr.of_string_exn "192.168.3.99")
   let external_netmask = (Ipaddr.V4.of_string_exn "255.255.255.0")
   let internal_ip = (Ipaddr.V4.of_string_exn "10.0.0.1")
   let internal_netmask = (Ipaddr.V4.of_string_exn "255.255.255.0")
-  let external_gateway = (Ipaddr.V4.of_string_exn "192.168.3.1") 
+  let external_gateway = (Ipaddr.V4.of_string_exn "192.168.3.1")
 
   (* what level of thing does this need to take?  it needs access to ip and
      udp/tcp headers. *)
   (* at ethif level we can write our own ingestors for ipv4, ipv6; use them
      to rewrite at least ip headers, spit them out the other interface *)
 
-  let table () = 
+  let table () =
     let open Lookup in
     (* TODO: rewrite as a bind *)
-    match insert (empty ()) 6 (Ipaddr.of_string_exn "10.0.0.2", 80) 
+    match insert (empty ()) 6 (Ipaddr.of_string_exn "10.0.0.2", 80)
             (Ipaddr.of_string_exn "192.168.3.1", 52966)(external_ip, 9999) Active with
     | None -> raise (Failure "Couldn't create hardcoded NAT table")
-    | Some t -> 
+    | Some t ->
       match insert t 17 (Ipaddr.of_string_exn "10.0.0.2", 53)
               (Ipaddr.of_string_exn "192.168.3.1", 52966)
               (external_ip, 9999) Active with
@@ -35,8 +35,8 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
   let listen nf i push =
     (* ingest packets *)
-    PRI.listen (ETH.id nf) 
-      (fun frame -> 
+    PRI.listen (ETH.id nf)
+      (fun frame ->
          match (Wire_structs.get_ethernet_ethertype frame) with
          | 0x0806 -> I.input_arpv4 i frame
          | _ -> return (push (Some frame)))
@@ -45,41 +45,41 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
     let rec stubborn_insert table frame ip port = match port with
       (* TODO: in the unlikely event that no port is available, this
          function will never terminate *)
-            (* TODO: lookup (or someone, maybe tcpip!) 
+            (* TODO: lookup (or someone, maybe tcpip!)
                should have a facility for choosing a random unused
                source port *)
-      | n when n < 1024 -> 
+      | n when n < 1024 ->
         stubborn_insert table frame ip (Random.int 65535)
-      | n -> 
+      | n ->
         match Rewrite.make_entry table frame ip n Active with
         | Ok t -> Some t
-        | Unparseable -> 
+        | Unparseable ->
           None
-        | Overlap -> 
+        | Overlap ->
           stubborn_insert table frame ip (Random.int 65535)
     in
     stubborn_insert table frame ip (Random.int 65535)
 
-  let shovel matches unparseables inserts nf ip table (direction : direction) 
+  let shovel matches unparseables inserts nf ip table (direction : direction)
       in_queue out_push =
     let rec frame_wrapper frame =
       (* typical NAT logic: traffic from the internal "trusted" interface gets
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
       match direction, (Rewrite.translate table direction frame) with
-      | Destination, None -> 
+      | Destination, None ->
       return_unit
-      | _, Some f -> 
+      | _, Some f ->
         MProf.Counter.increase matches 1;
-        return (out_push (Some f)) 
-      | Source, None -> 
+        return (out_push (Some f))
+      | Source, None ->
         (* mutate table to include entries for the frame *)
         match allow_traffic table frame ip with
         | Some t ->
           (* try rewriting again; we should now have an entry for this packet *)
           MProf.Counter.increase inserts 1;
           frame_wrapper frame
-        | None -> 
+        | None ->
           (* this frame is hopeless! *)
           MProf.Counter.increase unparseables 1;
           return_unit
@@ -98,7 +98,7 @@ let send_packets c nf i out_queue =
     Wire_structs.set_ethernet_src new_smac 0 frame;
     let ip_layer = Cstruct.shift frame (Wire_structs.sizeof_ethernet) in
     let ipv4_frame_size = (Wire_structs.get_ipv4_hlen_version ip_layer land 0x0f) * 4 in
-    let higherlevel_data = 
+    let higherlevel_data =
       Cstruct.sub frame (Wire_structs.sizeof_ethernet + ipv4_frame_size)
       (Cstruct.len frame - (Wire_structs.sizeof_ethernet + ipv4_frame_size))
     in
@@ -112,9 +112,9 @@ let send_packets c nf i out_queue =
       set_checksum higherlevel_data actual_checksum
     in
     let () = match Wire_structs.get_ipv4_proto ip_layer with
-    | 17 -> 
+    | 17 ->
       fix_checksum Wire_structs.set_udp_checksum ip_layer higherlevel_data
-    | 6 -> 
+    | 6 ->
       fix_checksum Wire_structs.Tcp_wire.set_tcp_checksum ip_layer higherlevel_data
     | _ -> ()
     in
@@ -165,12 +165,12 @@ let unparseable = MProf.Counter.make "unparseable packets" in
 let entries = MProf.Counter.make "table entries added" in
 
 let nat = shovel xl_counter unparseable entries in
- 
+
   Lwt.choose [
     (* packet intake *)
     (listen nf1 ext_i pri_in_push);
-    (listen nf2 int_i sec_in_push); 
-    
+    (listen nf2 int_i sec_in_push);
+
     (* address translation *)
     (* for packets received on the first interface (xenbr0/br0 in examples, which is an "external" world-facing interface), rewrite destination addresses  *)
     (nat nf1 external_ip t Destination pri_in_queue sec_out_push);
@@ -179,7 +179,7 @@ let nat = shovel xl_counter unparseable entries in
     (nat nf2 external_ip t Source sec_in_queue pri_out_push);
 
     (* packet output *)
-    (send_packets c nf1 ext_i pri_out_queue); 
+    (send_packets c nf1 ext_i pri_out_queue);
     (send_packets c nf2 int_i sec_out_queue)
   ]
 
