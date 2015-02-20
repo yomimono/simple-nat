@@ -27,7 +27,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
         stubborn_insert table frame ip (Random.int 65535)
       | n ->
         match Nat_rewrite.make_entry table frame ip n with
-        | Ok t -> Printf.printf "added an entry for :\n"; Cstruct.hexdump frame; Some t
+        | Ok t -> Some t
         | Unparseable ->
           None
         | Overlap ->
@@ -53,19 +53,15 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
                        (proto_of_frame frame), (layers frame)) with
         | Some (src, dst), Some (sport, dport), Some proto, Some (f, ip_layer, tx_layer)
           when (dst = ip && dport = fwd_dport) -> (
-            Printf.printf "setting up an entry %s, %d, %s, %d -> %s, %d\n"
-              (Ipaddr.to_string internal_client) dport (Ipaddr.to_string src) sport
-              (Ipaddr.to_string ip) dport;
           (* add an entry as if our client had requested something from the
              remote hosts sport, on its own dport *)
             match Nat_lookup.insert nat_table proto (internal_client, dport) (src, sport)
                     (ip, dport) with
-            | None -> Printf.printf "insertion failed"; return_unit
+            | None -> return_unit
             | Some nat_table ->
               match Nat_rewrite.translate nat_table direction frame with
-              | Some f -> Printf.printf "got it"; return (out_push (Some f))
-              | None -> Printf.printf "couldn't translate after entry added";
-                return_unit
+              | Some f -> return (out_push (Some f))
+              | None -> return_unit
           )
         | _, _, _, _ -> return_unit
         )
