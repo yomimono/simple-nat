@@ -21,7 +21,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
      to rewrite at least ip headers, spit them out the other interface *)
 
   let table () =
-    let open Lookup in
+    let open Nat_lookup in
     (* TODO: rewrite as a bind *)
     match insert (empty ()) 6 (Ipaddr.of_string_exn "10.0.0.2", 80)
             (Ipaddr.of_string_exn "192.168.3.1", 52966)(external_ip, 9999) Active with
