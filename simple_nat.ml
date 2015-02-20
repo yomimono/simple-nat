@@ -4,23 +4,14 @@ open Nat_rewrite
 
 module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
-  module ETH = Ethif.Make(PRI) 
+  module ETH = Ethif.Make(PRI)
   module I = Ipv4.Make(ETH)
-  module T = OS.Time (* the fact that I know this is OS.Time, and not just some
-                        V1_LWT Time implementation, lets me take some liberties *)
-               (* this probably actually *should* come from `config.ml` by way
-                  of `mirage configure`, though *)
-               (* under what circumstances would we want to use a different
-                 `time impl`?  I guess if we don't trust dom0, but it's hard to
-                  imagine overcoming that with any particular alternative; even
-                  a passthrough to an independent clock is a passthrough via 
-                  dom0 *)
   type direction = Nat_rewrite.direction
 
   let listen nf i push =
     (* ingest packets *)
-    PRI.listen (ETH.id nf) 
-      (fun frame -> 
+    PRI.listen (ETH.id nf)
+      (fun frame ->
          match (Wire_structs.get_ethernet_ethertype frame) with
          | 0x0806 -> I.input_arpv4 i frame
          | _ -> return (push (Some frame)))
@@ -29,24 +20,24 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
     let rec stubborn_insert table frame ip port = match port with
       (* TODO: in the unlikely event that no port is available, this
          function will never terminate *)
-            (* TODO: lookup (or someone, maybe tcpip!) 
+            (* TODO: lookup (or someone, maybe tcpip!)
                should have a facility for choosing a random unused
                source port *)
-      | n when n < 1024 -> 
+      | n when n < 1024 ->
         stubborn_insert table frame ip (Random.int 65535)
-      | n -> 
+      | n ->
         match Nat_rewrite.make_entry table frame ip n with
         | Ok t -> Printf.printf "added an entry for :\n"; Cstruct.hexdump frame; Some t
-        | Unparseable -> 
+        | Unparseable ->
           None
-        | Overlap -> 
+        | Overlap ->
           stubborn_insert table frame ip (Random.int 65535)
     in
     (* TODO: connection tracking logic *)
     stubborn_insert table frame ip (Random.int 65535)
 
-  let shovel matches unparseables inserts nf ip fwd_dport internal_client 
-      nat_table (direction : direction) 
+  let shovel matches unparseables inserts nf ip fwd_dport internal_client
+      nat_table (direction : direction)
       in_queue out_push =
     let rec frame_wrapper frame =
       (* typical NAT logic: traffic from the internal "trusted" interface gets
@@ -56,13 +47,13 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
       | Destination, None ->   (
         (* if this isn't return traffic from an outgoing request, check to see
            whether it's traffic we know we should forward on to internal_client
-           because of preconfigured port forward mappings 
+           because of preconfigured port forward mappings
           *)
         match Nat_rewrite.((ips_of_frame frame), (ports_of_frame frame),
                        (proto_of_frame frame), (layers frame)) with
         | Some (src, dst), Some (sport, dport), Some proto, Some (f, ip_layer, tx_layer)
           when (dst = ip && dport = fwd_dport) -> (
-            Printf.printf "setting up an entry %s, %d, %s, %d -> %s, %d\n" 
+            Printf.printf "setting up an entry %s, %d, %s, %d -> %s, %d\n"
               (Ipaddr.to_string internal_client) dport (Ipaddr.to_string src) sport
               (Ipaddr.to_string ip) dport;
           (* add an entry as if our client had requested something from the
@@ -71,24 +62,24 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
                     (ip, dport) with
             | None -> Printf.printf "insertion failed"; return_unit
             | Some nat_table ->
-              match Nat_rewrite.translate nat_table direction frame with 
+              match Nat_rewrite.translate nat_table direction frame with
               | Some f -> Printf.printf "got it"; return (out_push (Some f))
               | None -> Printf.printf "couldn't translate after entry added";
                 return_unit
           )
         | _, _, _, _ -> return_unit
         )
-      | _, Some f -> 
+      | _, Some f ->
         MProf.Counter.increase matches 1;
-        return (out_push (Some f)) 
-      | Source, None -> 
+        return (out_push (Some f))
+      | Source, None ->
         (* mutate nat_table to include entries for the frame *)
         match allow_traffic nat_table frame ip with
         | Some t ->
           (* try rewriting again; we should now have an entry for this packet *)
           MProf.Counter.increase inserts 1;
           frame_wrapper frame
-        | None -> 
+        | None ->
           (* this frame is hopeless! *)
           MProf.Counter.increase unparseables 1;
           return_unit
@@ -107,7 +98,7 @@ let send_packets c nf i out_queue =
     Wire_structs.set_ethernet_src new_smac 0 frame;
     let ip_layer = Cstruct.shift frame (Wire_structs.sizeof_ethernet) in
     let ipv4_frame_size = (Wire_structs.get_ipv4_hlen_version ip_layer land 0x0f) * 4 in
-    let higherlevel_data = 
+    let higherlevel_data =
       Cstruct.sub frame (Wire_structs.sizeof_ethernet + ipv4_frame_size)
       (Cstruct.len frame - (Wire_structs.sizeof_ethernet + ipv4_frame_size))
     in
@@ -121,9 +112,9 @@ let send_packets c nf i out_queue =
       set_checksum higherlevel_data actual_checksum
     in
     let () = match Wire_structs.get_ipv4_proto ip_layer with
-    | 17 -> 
+    | 17 ->
       fix_checksum Wire_structs.set_udp_checksum ip_layer higherlevel_data
-    | 6 -> 
+    | 6 ->
       fix_checksum Wire_structs.Tcp_wire.set_tcp_checksum ip_layer higherlevel_data
     | _ -> ()
     in
@@ -163,7 +154,7 @@ let start c pri sec =
   let external_gateway = try_bootvar "external_gateway" in
   let internal_client = try_bootvar "internal_client" in
   let next_hop_ip = try_bootvar "dest_ip" in
-  let intercept_port = int_of_string (Bootvar.get bootvar "dest_port") in 
+  let intercept_port = int_of_string (Bootvar.get bootvar "dest_port") in
   (* TODO: this might be a list *)
 
   (* initialize interfaces *)
@@ -182,9 +173,9 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
   (* initialize hardwired lookup table (i.e., "port forwarding") *)
 
   (* TODO: provide hooks for updates to/dump of this *)
-  let table () = 
+  let table () =
     let open Nat_lookup in
-    match insert (empty ()) 6 
+    match insert (empty ()) 6
             ((V4 internal_client), intercept_port)
             (Ipaddr.of_string_exn "192.168.3.1", 52966)
             ((V4 external_ip), 9999) with
@@ -199,29 +190,29 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
   let entries = MProf.Counter.make "table entries added" in
 
   let nat = shovel xl_counter unparseable entries in
- 
+
   Lwt.choose [
     (* packet intake *)
     (listen nf1 ext_i pri_in_push);
-    (listen nf2 int_i sec_in_push); 
+    (listen nf2 int_i sec_in_push);
 
     (* TODO: ICMP, at least on our own behalf *)
-    
+
     (* address translation *)
-    (* for packets received on the first interface (xenbr0/br0 in examples, 
-       which is an "external" world-facing interface), 
+    (* for packets received on the first interface (xenbr0/br0 in examples,
+       which is an "external" world-facing interface),
        rewrite destination addresses/ports before sending packet out the second
        interface *)
-    (nat nf1 (V4 external_ip) intercept_port (Ipaddr.V4 internal_client) nat_t 
+    (nat nf1 (V4 external_ip) intercept_port (Ipaddr.V4 internal_client) nat_t
        Destination pri_in_queue sec_out_push);
 
-    (* for packets received on xenbr1 ("internal"), rewrite source address/port 
+    (* for packets received on xenbr1 ("internal"), rewrite source address/port
        before sending packets out the primary interface *)
-    (nat nf2 (V4 external_ip) intercept_port (V4 internal_client) nat_t 
+    (nat nf2 (V4 external_ip) intercept_port (V4 internal_client) nat_t
        Source sec_in_queue pri_out_push);
 
     (* packet output *)
-    (send_packets c nf1 ext_i pri_out_queue); 
+    (send_packets c nf1 ext_i pri_out_queue);
     (send_packets c nf2 int_i sec_out_queue)
   ]
 
