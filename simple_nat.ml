@@ -166,17 +166,8 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
   I.set_ip_netmask int_i internal_netmask >>= fun () ->
   I.set_ip_gateways ext_i [ external_gateway ] >>= fun () -> ();
 
-  (* initialize hardwired lookup table (i.e., "port forwarding") *)
-
   (* TODO: provide hooks for updates to/dump of this *)
-  let table () =
-    let open Nat_lookup in
-    match insert (empty ()) 6
-            ((V4 internal_client), intercept_port)
-            (Ipaddr.of_string_exn "192.168.3.1", 52966)
-            ((V4 external_ip), 9999) ((V4 external_ip), 9999) with
-    | None -> raise (Failure "Couldn't create hardcoded NAT table")
-    | Some t -> t
+  let table () = empty()
   in
 
   let nat_t = table () in
