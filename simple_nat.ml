@@ -76,18 +76,14 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
                              (proto_of_frame frame)) with
           | Some (frame_src, frame_dst), Some (frame_sport, frame_dport), Some proto
             when (frame_dst = my_ip && frame_dport = fwd_dport) -> (
-              Printf.printf "I should allow this packet\n";
               (* rewrite traffic to come from our other interface and go to the
                  preconfigured client IP *)
               match allow_rewrite_traffic nat_table frame other_ip internal_client
                       fwd_dport with
               | None -> return_unit
               | Some nat_table ->
-                Printf.printf "new nat table: %s" (Nat_lookup.string_of_t
-                                                     nat_table);
                 match Nat_rewrite.translate nat_table direction frame with
-                | None -> Printf.printf "Couldn't translate a packet I just put in
-              table entries for!!!\n"; return_unit
+                | None -> return_unit
                 | Some f -> return (out_push (Some f)) 
             )
           | Some (src, dst), Some (sport, dport), Some proto -> return_unit
