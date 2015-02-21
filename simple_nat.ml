@@ -56,7 +56,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
           (* add an entry as if our client had requested something from the
              remote hosts sport, on its own dport *)
             match Nat_lookup.insert nat_table proto (internal_client, dport) (src, sport)
-                    (ip, dport) with
+                    (ip, dport) (ip, dport) with
             | None -> return_unit
             | Some nat_table ->
               match Nat_rewrite.translate nat_table direction frame with
@@ -174,7 +174,7 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
     match insert (empty ()) 6
             ((V4 internal_client), intercept_port)
             (Ipaddr.of_string_exn "192.168.3.1", 52966)
-            ((V4 external_ip), 9999) with
+            ((V4 external_ip), 9999) ((V4 external_ip), 9999) with
     | None -> raise (Failure "Couldn't create hardcoded NAT table")
     | Some t -> t
   in
