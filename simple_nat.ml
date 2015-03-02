@@ -37,9 +37,9 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
   (* other_ip means the IP held by the NAT device on the interface which *isn't*
      the one that received this traffic *)
   let allow_rewrite_traffic table frame other_ip client_ip fwd_port =
-    let rec stubborn_insert table frame other_ip client_ip fwd_port xl_port = 
+    let rec stubborn_insert table frame other_ip client_ip fwd_port xl_port =
       match xl_port with
-      | n when n < 1024 -> stubborn_insert table frame other_ip client_ip 
+      | n when n < 1024 -> stubborn_insert table frame other_ip client_ip
                              fwd_port (Random.int 65535)
       | n ->
         match Nat_rewrite.make_redirect_entry table frame (other_ip, n)
@@ -47,13 +47,39 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
         with
         | Ok t -> Some t
         | Unparseable -> None
-        | Overlap -> stubborn_insert table frame other_ip client_ip 
+        | Overlap -> stubborn_insert table frame other_ip client_ip
                        fwd_port (Random.int 65535)
     in
     stubborn_insert table frame other_ip client_ip fwd_port (Random.int 65535)
 
-  let shovel matches unparseables inserts nf external_ip internal_ip (internal_client,
-                                                          fwd_dport)
+  (* simple_filter allows clients on the internal side to send any traffic to
+    the NAT's IP and a forwarding port.  It allows any return traffic back to
+     the local network. *)
+  let simple_filter external_ip fwd_dport (direction : direction) in_queue
+      out_push =
+    let rec filter frame =
+      match direction with
+      | Destination ->
+        (* TODO: this will leak broadcast traffic *)
+        return (out_push (Some frame))
+      | Source ->
+        (* check dst, dport vs external_ip, fwd_dport and send any matching
+           frames to out_push with no alterations made *)
+        (* TODO: really we should be checking proto too, but we don't get that
+          in bootvars at the moment *)
+        match Nat_rewrite.((ips_of_frame frame), (ports_of_frame frame)) with
+        | Some (_, frame_dst), Some (_, frame_dport)
+          when (frame_dst, frame_dport) = (external_ip, fwd_dport) ->
+          return (out_push (Some frame))
+        | _ -> return_unit
+
+    in
+    let rec loop () =
+      Lwt_stream.next in_queue >>= filter >>= loop
+    in
+    loop ()
+
+  let shovel external_ip internal_ip (internal_client, fwd_dport)
       nat_table (direction : direction)
       in_queue out_push =
     let rec frame_wrapper frame =
@@ -61,7 +87,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
       match direction, (Nat_rewrite.translate nat_table direction frame) with
-      | Destination, None ->  
+      | Destination, None ->
         (
         (* if this isn't return traffic from an outgoing request, check to see
            whether it's traffic we know we should forward on to internal_client
@@ -84,24 +110,21 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
               | Some nat_table ->
                 match Nat_rewrite.translate nat_table direction frame with
                 | None -> return_unit
-                | Some f -> return (out_push (Some f)) 
+                | Some f -> return (out_push (Some f))
             )
           | Some (src, dst), Some (sport, dport), Some proto -> return_unit
           | _, _, _ -> return_unit
         )
       | _, Some f ->
-        MProf.Counter.increase matches 1;
         return (out_push (Some f))
       | Source, None ->
         (* mutate nat_table to include entries for the frame *)
         match allow_nat_traffic nat_table frame internal_ip with
         | Some t ->
           (* try rewriting again; we should now have an entry for this packet *)
-          MProf.Counter.increase inserts 1;
           frame_wrapper frame
         | None ->
           (* this frame is hopeless! *)
-          MProf.Counter.increase unparseables 1;
           return_unit
     in
     while_lwt true do
@@ -197,7 +220,7 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
   let unparseable = MProf.Counter.make "unparseable packets" in
   let entries = MProf.Counter.make "table entries added" in
 
-  let nat = shovel xl_counter unparseable entries in
+  let nat = shovel in
 
   Lwt.choose [
     (* packet intake *)
@@ -211,19 +234,19 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
        which is an "external" world-facing interface),
        rewrite destination addresses/ports before sending packet out the second
        interface *)
-    (* 
+    (*
   let shovel matches unparseables inserts nf ip other_ip (internal_client,
                                                           fwd_dport)
       nat_table (direction : direction)
       in_queue out_push =
     *)
-    (nat nf1 (V4 external_ip) (V4 internal_ip) 
+    (nat (V4 external_ip) (V4 internal_ip)
        ((Ipaddr.V4 internal_client), intercept_port) nat_t
        Destination pri_in_queue sec_out_push);
 
     (* for packets received on xenbr1 ("internal"), rewrite source address/port
        before sending packets out the primary interface *)
-    (nat nf2 (V4 external_ip) (V4 internal_ip) 
+    (nat (V4 external_ip) (V4 internal_ip)
        ((Ipaddr.V4 internal_client), intercept_port) nat_t
        Source sec_in_queue pri_out_push);
 
