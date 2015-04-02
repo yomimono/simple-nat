@@ -13,16 +13,17 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
     PRI.listen nf
       (fun frame ->
          match (Wire_structs.get_ethernet_ethertype frame) with
-         | 0x0806 -> I.input_arpv4 i frame
-         | _ -> return (push (Some frame)))
+         | 0x0806 -> I.input_arpv4 i frame (* maintain ARP caches for each
+                                              interface *)
+         | _ -> return (push (Some frame))) (* everything else goes in translate
+                                               queue *)
 
   let allow_nat_traffic table frame ip =
     let rec stubborn_insert table frame ip port = match port with
       (* TODO: in the unlikely event that no port is available, this
          function will never terminate *)
-            (* TODO: lookup (or someone, maybe tcpip!)
-               should have a facility for choosing a random unused
-               source port *)
+      (* TODO: tcpip should have a facility for choosing a random unused
+         source port in udp and tcp *)
       | n when n < 1024 ->
         stubborn_insert table frame ip (Random.int 65535)
       | n ->
