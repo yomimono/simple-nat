@@ -10,7 +10,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
 
   let listen nf i push =
     (* ingest packets *)
-    PRI.listen (ETH.id nf)
+    PRI.listen nf
       (fun frame ->
          match (Wire_structs.get_ethernet_ethertype frame) with
          | 0x0806 -> I.input_arpv4 i frame
@@ -52,34 +52,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
     in
     stubborn_insert table frame other_ip client_ip fwd_port (Random.int 65535)
 
-  (* simple_filter allows clients on the internal side to send any traffic to
-    the NAT's IP and a forwarding port.  It allows any return traffic back to
-     the local network. *)
-  let simple_filter external_ip fwd_dport (direction : direction) in_queue
-      out_push =
-    let rec filter frame =
-      match direction with
-      | Destination ->
-        (* TODO: this will leak broadcast traffic *)
-        return (out_push (Some frame))
-      | Source ->
-        (* check dst, dport vs external_ip, fwd_dport and send any matching
-           frames to out_push with no alterations made *)
-        (* TODO: really we should be checking proto too, but we don't get that
-          in bootvars at the moment *)
-        match Nat_rewrite.((ips_of_frame frame), (ports_of_frame frame)) with
-        | Some (_, frame_dst), Some (_, frame_dport)
-          when (frame_dst, frame_dport) = (external_ip, fwd_dport) ->
-          return (out_push (Some frame))
-        | _ -> return_unit
-
-    in
-    let rec loop () =
-      Lwt_stream.next in_queue >>= filter >>= loop
-    in
-    loop ()
-
-  let shovel external_ip internal_ip (internal_client, fwd_dport)
+  let nat external_ip internal_ip (internal_client, fwd_dport)
       nat_table (direction : direction)
       in_queue out_push =
     let rec frame_wrapper frame =
@@ -93,27 +66,24 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
            whether it's traffic we know we should forward on to internal_client
            because of preconfigured port forward mappings
         *)
-          let (my_ip, other_ip) = external_ip, internal_ip in (* known because
-                                                                we already
-                                                                matched on
-                                                                Direction =
-                                                                Destination *)
-          match Nat_rewrite.((ips_of_frame frame), (ports_of_frame frame),
-                             (proto_of_frame frame)) with
-          | Some (frame_src, frame_dst), Some (frame_sport, frame_dport), Some proto
-            when (frame_dst = my_ip && frame_dport = fwd_dport) -> (
-              (* rewrite traffic to come from our other interface and go to the
-                 preconfigured client IP *)
-              match allow_rewrite_traffic nat_table frame other_ip internal_client
-                      fwd_dport with
-              | None -> return_unit
-              | Some nat_table ->
-                match Nat_rewrite.translate nat_table direction frame with
+          (* known because we already matched on Direction = Destination *)
+          let (my_ip, other_ip) = external_ip, internal_ip in 
+          match Nat_rewrite.layers frame with
+          | None -> return_unit (* unparseable packet; drop it *)
+          | Some (ethernet_layer, ip_layer, transport_layer) ->
+            let (frame_src, frame_dst) = addresses_of_ip ip_layer in
+            let (frame_sport, frame_dport) = ports_of_transport transport_layer in
+              if (frame_dst = my_ip && frame_dport = fwd_dport) then
+                (* rewrite traffic to come from our other interface and go to the
+                   preconfigured client IP *)
+                match allow_rewrite_traffic nat_table frame other_ip internal_client
+                        fwd_dport with
                 | None -> return_unit
-                | Some f -> return (out_push (Some f))
-            )
-          | Some (src, dst), Some (sport, dport), Some proto -> return_unit
-          | _, _, _ -> return_unit
+                | Some nat_table ->
+                  match Nat_rewrite.translate nat_table direction frame with
+                  | None -> return_unit
+                  | Some f -> return (out_push (Some f))
+              else return_unit
         )
       | _, Some f ->
         return (out_push (Some f))
@@ -135,31 +105,14 @@ let send_packets c nf i out_queue =
   while_lwt true do
     lwt frame = Lwt_stream.next out_queue in
 
-    let new_smac = Macaddr.to_bytes (ETH.mac nf) in
-    Wire_structs.set_ethernet_src new_smac 0 frame;
-    let ip_layer = Cstruct.shift frame (Wire_structs.sizeof_ethernet) in
-    let ipv4_frame_size = (Wire_structs.get_ipv4_hlen_version ip_layer land 0x0f) * 4 in
-    let higherlevel_data =
-      Cstruct.sub frame (Wire_structs.sizeof_ethernet + ipv4_frame_size)
-      (Cstruct.len frame - (Wire_structs.sizeof_ethernet + ipv4_frame_size))
-    in
-    let just_headers = Cstruct.sub frame 0 (Wire_structs.sizeof_ethernet +
-                                            ipv4_frame_size) in
-    let fix_checksum set_checksum ip_layer higherlevel_data =
-      (* reset checksum to 0 for recalculation *)
-      set_checksum higherlevel_data 0;
-      let actual_checksum = I.checksum just_headers (higherlevel_data ::
-                                                     []) in
-      set_checksum higherlevel_data actual_checksum
-    in
-    let () = match Wire_structs.get_ipv4_proto ip_layer with
-    | 17 ->
-      fix_checksum Wire_structs.set_udp_checksum ip_layer higherlevel_data
-    | 6 ->
-      fix_checksum Wire_structs.Tcp_wire.set_tcp_checksum ip_layer higherlevel_data
-    | _ -> ()
-    in
-    I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
+    let new_smac = Macaddr.to_bytes (PRI.mac nf) in
+    match Nat_rewrite.layers frame with
+    | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
+    | Some layers ->
+      let (just_headers, higherlevel_data) =
+        Nat_rewrite.recalculate_transport_checksum (I.checksum) layers
+      in
+      I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
   done
 
 let start c pri sec =
@@ -178,13 +131,6 @@ let start c pri sec =
       return t
   in
 
-  let to_v4_exn ip =
-    match (Ipaddr.to_v4 ip) with
-    | None -> raise (Failure ("Attempted to convert an incompatible IP to IPv4: "
-                             ^ (Ipaddr.to_string ip)))
-    | Some i -> i
-  in
-
   (* get network configuration from bootvars *)
   Bootvar.create >>= fun bootvar ->
   let try_bootvar key = Ipaddr.V4.of_string_exn (Bootvar.get bootvar key) in
@@ -195,7 +141,6 @@ let start c pri sec =
   let external_gateway = try_bootvar "external_gateway" in
   let internal_client = try_bootvar "internal_client" in
   let intercept_port = int_of_string (Bootvar.get bootvar "dest_port") in
-  (* TODO: this might be a list *)
 
   (* initialize interfaces *)
   lwt nf1 = or_error c "primary interface" ETH.connect pri in
@@ -203,7 +148,7 @@ let start c pri sec =
 
   (* set up ipv4 on interfaces so ARP will be answered *)
   lwt ext_i = or_error c "ip for primary interface" I.connect nf1 in
-lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
+  lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
   I.set_ip ext_i external_ip >>= fun () ->
   I.set_ip_netmask ext_i external_netmask >>= fun () ->
   I.set_ip int_i internal_ip >>= fun () ->
@@ -216,16 +161,10 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
 
   let nat_t = table () in
 
-  let xl_counter = MProf.Counter.make "forwarded packets" in
-  let unparseable = MProf.Counter.make "unparseable packets" in
-  let entries = MProf.Counter.make "table entries added" in
-
-  let nat = shovel in
-
   Lwt.choose [
     (* packet intake *)
-    (listen nf1 ext_i pri_in_push);
-    (listen nf2 int_i sec_in_push);
+    (listen pri ext_i pri_in_push);
+    (listen sec int_i sec_in_push);
 
     (* TODO: ICMP, at least on our own behalf *)
 
@@ -234,12 +173,6 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
        which is an "external" world-facing interface),
        rewrite destination addresses/ports before sending packet out the second
        interface *)
-    (*
-  let shovel matches unparseables inserts nf ip other_ip (internal_client,
-                                                          fwd_dport)
-      nat_table (direction : direction)
-      in_queue out_push =
-    *)
     (nat (V4 external_ip) (V4 internal_ip)
        ((Ipaddr.V4 internal_client), intercept_port) nat_t
        Destination pri_in_queue sec_out_push);
@@ -251,8 +184,8 @@ lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
        Source sec_in_queue pri_out_push);
 
     (* packet output *)
-    (send_packets c nf1 ext_i pri_out_queue);
-    (send_packets c nf2 int_i sec_out_queue)
+    (send_packets c pri ext_i pri_out_queue);
+    (send_packets c sec int_i sec_out_queue)
   ]
 
 end
