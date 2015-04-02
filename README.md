@@ -1,8 +1,7 @@
 ### Prepare
 
 ```
-opam pin add arbitrary-network https://github.com/yomimono/arbitrary-network.git
-opam pin add mirage-nat https://github.com/yomimono/ocaml-nat.git
+opam pin add mirage-nat https://github.com/yomimono/mirage-nat.git
 ```
 
 (optional)
