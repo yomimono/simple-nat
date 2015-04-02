@@ -19,10 +19,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
   let allow_nat_traffic table frame ip =
     let rec stubborn_insert table frame ip port = match port with
       (* TODO: in the unlikely event that no port is available, this
-         function will never terminate *)
-            (* TODO: lookup (or someone, maybe tcpip!)
-               should have a facility for choosing a random unused
-               source port *)
+         function will never terminate (this is really a tcpip todo) *)
       | n when n < 1024 ->
         stubborn_insert table frame ip (Random.int 65535)
       | n ->
@@ -52,39 +49,14 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
     in
     stubborn_insert table frame other_ip client_ip fwd_port (Random.int 65535)
 
-  let nat external_ip internal_ip (internal_client, fwd_dport)
-      nat_table (direction : direction)
+  let nat external_ip internal_ip nat_table (direction : direction)
       in_queue out_push =
     let rec frame_wrapper frame =
       (* typical NAT logic: traffic from the internal "trusted" interface gets
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
       match direction, (Nat_rewrite.translate nat_table direction frame) with
-      | Destination, None ->
-        (
-        (* if this isn't return traffic from an outgoing request, check to see
-           whether it's traffic we know we should forward on to internal_client
-           because of preconfigured port forward mappings
-        *)
-          (* known because we already matched on Direction = Destination *)
-          let (my_ip, other_ip) = external_ip, internal_ip in 
-          match Nat_rewrite.layers frame with
-          | None -> return_unit (* unparseable packet; drop it *)
-          | Some (ethernet_layer, ip_layer, transport_layer) ->
-            let (frame_src, frame_dst) = addresses_of_ip ip_layer in
-            let (frame_sport, frame_dport) = ports_of_transport transport_layer in
-              if (frame_dst = my_ip && frame_dport = fwd_dport) then
-                (* rewrite traffic to come from our other interface and go to the
-                   preconfigured client IP *)
-                match allow_rewrite_traffic nat_table frame other_ip internal_client
-                        fwd_dport with
-                | None -> return_unit
-                | Some nat_table ->
-                  match Nat_rewrite.translate nat_table direction frame with
-                  | None -> return_unit
-                  | Some f -> return (out_push (Some f))
-              else return_unit
-        )
+      | Destination, None -> Lwt.return_unit (* nothing in the table, drop it *)
       | _, Some f ->
         return (out_push (Some f))
       | Source, None ->
@@ -105,12 +77,12 @@ let send_packets c nf i out_queue =
   while_lwt true do
     lwt frame = Lwt_stream.next out_queue in
 
-    let new_smac = Macaddr.to_bytes (PRI.mac nf) in
     match Nat_rewrite.layers frame with
     | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
-    | Some layers ->
+    | Some (ether, ip, tx) ->
+      let ether = Nat_rewrite.set_smac ether (PRI.mac nf) in
       let (just_headers, higherlevel_data) =
-        Nat_rewrite.recalculate_transport_checksum (I.checksum) layers
+        Nat_rewrite.recalculate_transport_checksum (I.checksum) (ether, ip, tx)
       in
       I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
   done
@@ -139,8 +111,6 @@ let start c pri sec =
   let external_ip = try_bootvar "external_ip" in
   let external_netmask = try_bootvar "external_netmask" in
   let external_gateway = try_bootvar "external_gateway" in
-  let internal_client = try_bootvar "internal_client" in
-  let intercept_port = int_of_string (Bootvar.get bootvar "dest_port") in
 
   (* initialize interfaces *)
   lwt nf1 = or_error c "primary interface" ETH.connect pri in
@@ -169,19 +139,16 @@ let start c pri sec =
     (* TODO: ICMP, at least on our own behalf *)
 
     (* address translation *)
+
+    (* for packets received on xenbr1 ("internal"), rewrite source address/port
+       before sending packets out the primary interface *)
+    (nat (Ipaddr.V4 external_ip) (Ipaddr.V4 internal_ip) nat_t Source sec_in_queue pri_out_push);
+
     (* for packets received on the first interface (xenbr0/br0 in examples,
        which is an "external" world-facing interface),
        rewrite destination addresses/ports before sending packet out the second
        interface *)
-    (nat (V4 external_ip) (V4 internal_ip)
-       ((Ipaddr.V4 internal_client), intercept_port) nat_t
-       Destination pri_in_queue sec_out_push);
-
-    (* for packets received on xenbr1 ("internal"), rewrite source address/port
-       before sending packets out the primary interface *)
-    (nat (V4 external_ip) (V4 internal_ip)
-       ((Ipaddr.V4 internal_client), intercept_port) nat_t
-       Source sec_in_queue pri_out_push);
+    (nat (Ipaddr.V4 external_ip) (Ipaddr.V4 internal_ip) nat_t Destination pri_in_queue sec_out_push);
 
     (* packet output *)
     (send_packets c pri ext_i pri_out_queue);
