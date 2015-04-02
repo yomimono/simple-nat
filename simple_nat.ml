@@ -31,24 +31,6 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
     (* TODO: connection tracking logic *)
     stubborn_insert table frame ip (Random.int 65535)
 
-  (* other_ip means the IP held by the NAT device on the interface which *isn't*
-     the one that received this traffic *)
-  let allow_rewrite_traffic table frame other_ip client_ip fwd_port =
-    let rec stubborn_insert table frame other_ip client_ip fwd_port xl_port =
-      match xl_port with
-      | n when n < 1024 -> stubborn_insert table frame other_ip client_ip
-                             fwd_port (Random.int 65535)
-      | n ->
-        match Nat_rewrite.make_redirect_entry table frame (other_ip, n)
-                (client_ip, fwd_port)
-        with
-        | Ok t -> Some t
-        | Unparseable -> None
-        | Overlap -> stubborn_insert table frame other_ip client_ip
-                       fwd_port (Random.int 65535)
-    in
-    stubborn_insert table frame other_ip client_ip fwd_port (Random.int 65535)
-
   let nat external_ip internal_ip nat_table (direction : direction)
       in_queue out_push =
     let rec frame_wrapper frame =
@@ -56,12 +38,13 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
       match direction, (Nat_rewrite.translate nat_table direction frame) with
-      | Destination, None -> Lwt.return_unit (* nothing in the table, drop it *)
+      | Destination, None -> 
+        Lwt.return_unit (* nothing in the table, drop it *)
       | _, Some f ->
         return (out_push (Some f))
       | Source, None ->
         (* mutate nat_table to include entries for the frame *)
-        match allow_nat_traffic nat_table frame internal_ip with
+        match allow_nat_traffic nat_table frame external_ip with
         | Some t ->
           (* try rewriting again; we should now have an entry for this packet *)
           frame_wrapper frame
