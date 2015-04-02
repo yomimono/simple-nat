@@ -52,7 +52,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
     in
     stubborn_insert table frame other_ip client_ip fwd_port (Random.int 65535)
 
-  let shovel external_ip internal_ip (internal_client, fwd_dport)
+  let nat external_ip internal_ip (internal_client, fwd_dport)
       nat_table (direction : direction)
       in_queue out_push =
     let rec frame_wrapper frame =
@@ -106,30 +106,13 @@ let send_packets c nf i out_queue =
     lwt frame = Lwt_stream.next out_queue in
 
     let new_smac = Macaddr.to_bytes (PRI.mac nf) in
-    Wire_structs.set_ethernet_src new_smac 0 frame;
-    let ip_layer = Cstruct.shift frame (Wire_structs.sizeof_ethernet) in
-    let ipv4_frame_size = (Wire_structs.Ipv4_wire.get_ipv4_hlen_version ip_layer land 0x0f) * 4 in
-    let higherlevel_data =
-      Cstruct.sub frame (Wire_structs.sizeof_ethernet + ipv4_frame_size)
-      (Cstruct.len frame - (Wire_structs.sizeof_ethernet + ipv4_frame_size))
-    in
-    let just_headers = Cstruct.sub frame 0 (Wire_structs.sizeof_ethernet +
-                                            ipv4_frame_size) in
-    let fix_checksum set_checksum ip_layer higherlevel_data =
-      (* reset checksum to 0 for recalculation *)
-      set_checksum higherlevel_data 0;
-      let actual_checksum = I.checksum just_headers (higherlevel_data ::
-                                                     []) in
-      set_checksum higherlevel_data actual_checksum
-    in
-    let () = match Wire_structs.Ipv4_wire.get_ipv4_proto ip_layer with
-    | 17 ->
-      fix_checksum Wire_structs.set_udp_checksum ip_layer higherlevel_data
-    | 6 ->
-      fix_checksum Wire_structs.Tcp_wire.set_tcp_checksum ip_layer higherlevel_data
-    | _ -> ()
-    in
-    I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
+    match Nat_rewrite.layers frame with
+    | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
+    | Some layers ->
+      let (just_headers, higherlevel_data) =
+        Nat_rewrite.recalculate_transport_checksum (I.checksum) layers
+      in
+      I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
   done
 
 let start c pri sec =
@@ -177,7 +160,6 @@ let start c pri sec =
   in
 
   let nat_t = table () in
-  let nat = shovel in
 
   Lwt.choose [
     (* packet intake *)
