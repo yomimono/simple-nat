@@ -1,2 +1,4 @@
 EXT lwt
+PKG irmin
+PKG lwt
 PKG lwt.syntax
