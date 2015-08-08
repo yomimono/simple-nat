@@ -1,19 +1,29 @@
 open V1_LWT
 open Lwt
-open Nat_rewrite
 
-module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
+(* does ptime do something like int64 -> string? *)
+module Date = struct
+  let pretty _ = "a long long time ago"
+end
+
+
+module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) (KV : KV_RO)
+    (HTTP: Cohttp_lwt.Server) = struct
 
   module ETH = Ethif.Make(PRI)
-  module I = Ipv4.Make(ETH)
+  module A = Arpv4.Make(ETH)(Clock)(OS.Time)
+  module I = Ipv4.Make(ETH)(A)
+  module Backend = Irmin_mem.Make
+  module Mem_table = Nat_lookup.Make(Backend)
+  module Nat = Nat_rewrite.Make(Mem_table)
   type direction = Nat_rewrite.direction
 
-  let listen nf i push =
+  let listen nf arp push =
     (* ingest packets *)
     PRI.listen nf
       (fun frame ->
          match (Wire_structs.get_ethernet_ethertype frame) with
-         | 0x0806 -> I.input_arpv4 i frame
+         | 0x0806 -> A.input arp (Cstruct.shift frame 14)
          | _ -> return (push (Some frame)))
 
   let allow_nat_traffic table frame ip =
@@ -23,9 +33,10 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
       | n when n < 1024 ->
         stubborn_insert table frame ip (Random.int 65535)
       | n ->
-        match Nat_rewrite.make_nat_entry table frame ip n with
-        | Ok t -> Some t
-        | Unparseable -> None
+        let open Nat in
+        make_nat_entry table frame ip n >>= function
+        | Ok t -> Lwt.return (Some t)
+        | Unparseable -> Lwt.return None
         | Overlap -> stubborn_insert table frame ip (Random.int 65535)
     in
     (* TODO: connection tracking logic *)
@@ -39,11 +50,11 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
       | n when n < 1024 -> stubborn_insert table frame other_ip client_ip
                              fwd_port (Random.int 65535)
       | n ->
-        match Nat_rewrite.make_redirect_entry table frame (other_ip, n)
-                (client_ip, fwd_port)
-        with
-        | Ok t -> Some t
-        | Unparseable -> None
+        let open Nat in
+        make_redirect_entry table frame (other_ip, n)
+          (client_ip, fwd_port) >>= function
+        | Ok t -> Lwt.return (Some t)
+        | Unparseable -> Lwt.return None
         | Overlap -> stubborn_insert table frame other_ip client_ip
                        fwd_port (Random.int 65535)
     in
@@ -55,13 +66,14 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
       (* typical NAT logic: traffic from the internal "trusted" interface gets
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
-      match direction, (Nat_rewrite.translate nat_table direction frame) with
+      Nat.translate nat_table direction frame >>= fun result ->
+      match direction, result with
       | Destination, None -> Lwt.return_unit (* nothing in the table, drop it *)
       | _, Some f ->
         return (out_push (Some f))
       | Source, None ->
         (* mutate nat_table to include entries for the frame *)
-        match allow_nat_traffic nat_table frame internal_ip with
+        allow_nat_traffic nat_table frame internal_ip >>= function
         | Some t ->
           (* try rewriting again; we should now have an entry for this packet *)
           frame_wrapper frame
@@ -77,9 +89,9 @@ let send_packets c nf i out_queue =
   while_lwt true do
     lwt frame = Lwt_stream.next out_queue in
 
-    match Nat_rewrite.layers frame with
+    match Nat_decompose.layers frame with
     | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
-    | Some (ether, ip, tx) ->
+    | Some (ether, ip, tx, _payload) ->
       let ether = Nat_rewrite.set_smac ether (PRI.mac nf) in
       let (just_headers, higherlevel_data) =
         Nat_rewrite.recalculate_transport_checksum (I.checksum) (ether, ip, tx)
@@ -87,7 +99,57 @@ let send_packets c nf i out_queue =
       I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
   done
 
-let start c pri sec =
+let start c pri sec fs http =
+  let module Http_server = struct
+  include HTTP
+
+  let listen given_http ?timeout _uri =
+    let read_fs name =
+      KV.size fs name
+      >>= function
+      | `Error (KV.Unknown_key _) -> fail (Failure ("read " ^ name))
+      | `Ok size ->
+        KV.read fs name 0 (Int64.to_int size)
+        >>= function
+        | `Error (KV.Unknown_key _) -> fail (Failure ("read " ^ name))
+        | `Ok bufs -> return (Cstruct.copyv bufs)
+    in
+
+    (* Split a URI into a list of path segments *)
+    let split_path uri =
+      let path = Uri.path uri in
+      let rec aux = function
+        | [] | [ (Re_str.Text "")] -> []
+        | [ (Re_str.Delim "/") ] -> ["index.html"] (*trailing slash*)
+        | (Re_str.Text hd)::tl -> hd :: aux tl
+        | (Re_str.Delim hd)::tl -> aux tl
+      in
+      (List.filter (fun e -> e <> "")
+        (aux (Re_str.(full_split (regexp_string "/") path))))
+    in
+
+    (* dispatch non-file URLs *)
+    let rec dispatcher = function
+      | [] | [""] -> dispatcher ["index.html"] 
+      | segments ->
+        let path = String.concat "/" segments in
+        try_lwt
+          read_fs path
+          >>= fun body ->
+          HTTP.respond_string ~status:`OK ~body ()
+        with exn ->
+          HTTP.respond_not_found ()
+    in
+    let callback conn_id request body =
+      let headers = Cohttp.Header.init () in
+      let uri = Cohttp.Request.uri request in
+      dispatcher (split_path uri)
+    in
+    http (`TCP 80) given_http
+  end
+  in
+
+  let module Server = Irmin_http_server.Make(Http_server)(Date)(Mem_table.I) in
 
   let (pri_in_queue, pri_in_push) = Lwt_stream.create () in
   let (pri_out_queue, pri_out_push) = Lwt_stream.create () in
@@ -116,25 +178,25 @@ let start c pri sec =
   lwt nf1 = or_error c "primary interface" ETH.connect pri in
   lwt nf2 = or_error c "secondary interface" ETH.connect sec in
 
+  lwt arp1 = or_error c "primary arp layer" A.connect nf1 in
+  lwt arp2 = or_error c "secondary arp layer" A.connect nf2 in
+
   (* set up ipv4 on interfaces so ARP will be answered *)
-  lwt ext_i = or_error c "ip for primary interface" I.connect nf1 in
-  lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
+  lwt ext_i = or_error c "ip for primary interface" (I.connect nf1) arp1 in
+  lwt int_i = or_error c "ip for secondary interface" (I.connect nf2) arp2 in
   I.set_ip ext_i external_ip >>= fun () ->
   I.set_ip_netmask ext_i external_netmask >>= fun () ->
   I.set_ip int_i internal_ip >>= fun () ->
   I.set_ip_netmask int_i internal_netmask >>= fun () ->
-  I.set_ip_gateways ext_i [ external_gateway ] >>= fun () -> ();
+  I.set_ip_gateways ext_i [ external_gateway ] >>= fun () ->
 
   (* TODO: provide hooks for updates to/dump of this *)
-  let table () = Nat_lookup.empty ()
-  in
-
-  let nat_t = table () in
+  Mem_table.empty () >>= fun nat_t ->
 
   Lwt.choose [
     (* packet intake *)
-    (listen pri ext_i pri_in_push);
-    (listen sec int_i sec_in_push);
+    (listen pri arp1 pri_in_push);
+    (listen sec arp2 sec_in_push);
 
     (* TODO: ICMP, at least on our own behalf *)
 
@@ -152,7 +214,11 @@ let start c pri sec =
 
     (* packet output *)
     (send_packets c pri ext_i pri_out_queue);
-    (send_packets c sec int_i sec_out_queue)
+    (send_packets c sec int_i sec_out_queue);
+
+    (* HTTP server on management interface *)
+    Server.listen (Mem_table.store_of_t nat_t) (Uri.of_string
+                                                  "http://localhost:80")
   ]
 
 end
