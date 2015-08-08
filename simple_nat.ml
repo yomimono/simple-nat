@@ -150,7 +150,6 @@ let start c pri sec fs http =
   I.set_ip_netmask int_i internal_netmask >>= fun () ->
   I.set_ip_gateways ext_i [ external_gateway ] >>= fun () ->
 
-  (* TODO: provide hooks for updates to/dump of this *)
   Mem_table.empty () >>= fun nat_t ->
 
   Lwt.choose [
