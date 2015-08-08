@@ -104,48 +104,8 @@ let start c pri sec fs http =
   include HTTP
 
   let listen given_http ?timeout _uri =
-    let read_fs name =
-      KV.size fs name
-      >>= function
-      | `Error (KV.Unknown_key _) -> fail (Failure ("read " ^ name))
-      | `Ok size ->
-        KV.read fs name 0 (Int64.to_int size)
-        >>= function
-        | `Error (KV.Unknown_key _) -> fail (Failure ("read " ^ name))
-        | `Ok bufs -> return (Cstruct.copyv bufs)
-    in
-
-    (* Split a URI into a list of path segments *)
-    let split_path uri =
-      let path = Uri.path uri in
-      let rec aux = function
-        | [] | [ (Re_str.Text "")] -> []
-        | [ (Re_str.Delim "/") ] -> ["index.html"] (*trailing slash*)
-        | (Re_str.Text hd)::tl -> hd :: aux tl
-        | (Re_str.Delim hd)::tl -> aux tl
-      in
-      (List.filter (fun e -> e <> "")
-        (aux (Re_str.(full_split (regexp_string "/") path))))
-    in
-
-    (* dispatch non-file URLs *)
-    let rec dispatcher = function
-      | [] | [""] -> dispatcher ["index.html"] 
-      | segments ->
-        let path = String.concat "/" segments in
-        try_lwt
-          read_fs path
-          >>= fun body ->
-          HTTP.respond_string ~status:`OK ~body ()
-        with exn ->
-          HTTP.respond_not_found ()
-    in
-    let callback conn_id request body =
-      let headers = Cohttp.Header.init () in
-      let uri = Cohttp.Request.uri request in
-      dispatcher (split_path uri)
-    in
     http (`TCP 80) given_http
+
   end
   in
 
