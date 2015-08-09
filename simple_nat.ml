@@ -60,7 +60,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) (KV : KV_RO)
     in
     stubborn_insert table frame other_ip client_ip fwd_port (Random.int 65535)
 
-  let nat external_ip internal_ip nat_table (direction : direction)
+  let nat translation_ip nat_table (direction : direction)
       in_queue out_push =
     let rec frame_wrapper frame =
       (* typical NAT logic: traffic from the internal "trusted" interface gets
@@ -73,7 +73,7 @@ module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) (KV : KV_RO)
         return (out_push (Some f))
       | Source, None ->
         (* mutate nat_table to include entries for the frame *)
-        allow_nat_traffic nat_table frame internal_ip >>= function
+        allow_nat_traffic nat_table frame translation_ip >>= function
         | Some t ->
           (* try rewriting again; we should now have an entry for this packet *)
           frame_wrapper frame
@@ -152,6 +152,13 @@ let start c pri sec fs http =
 
   Mem_table.empty () >>= fun nat_t ->
 
+  C.log c (Printf.sprintf "NATting from external ip %s to internal ip %s in direction
+  Destination (default deny)" (Ipaddr.V4.to_string external_ip) (Ipaddr.V4.to_string
+                                                                internal_ip));
+  C.log c (Printf.sprintf "NATting from external ip %s to internal ip %s in direction Source
+  (default allow)" (Ipaddr.V4.to_string external_ip) (Ipaddr.V4.to_string
+                                                     internal_ip));
+
   Lwt.choose [
     (* packet intake *)
     (listen pri arp1 pri_in_push);
@@ -163,13 +170,13 @@ let start c pri sec fs http =
 
     (* for packets received on xenbr1 ("internal"), rewrite source address/port
        before sending packets out the primary interface *)
-    (nat (Ipaddr.V4 external_ip) (Ipaddr.V4 internal_ip) nat_t Source sec_in_queue pri_out_push);
+    (nat (Ipaddr.V4 external_ip) nat_t Source sec_in_queue pri_out_push);
 
     (* for packets received on the first interface (xenbr0/br0 in examples,
        which is an "external" world-facing interface),
        rewrite destination addresses/ports before sending packet out the second
        interface *)
-    (nat (Ipaddr.V4 external_ip) (Ipaddr.V4 internal_ip) nat_t Destination pri_in_queue sec_out_push);
+    (nat (Ipaddr.V4 external_ip) nat_t Destination pri_in_queue sec_out_push);
 
     (* packet output *)
     (send_packets c pri ext_i pri_out_queue);
