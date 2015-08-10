@@ -93,14 +93,20 @@ let send_packets c nf i out_queue =
     match Nat_decompose.layers frame with
     | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
     | Some (ether, ip, tx, _payload) ->
-      let ether = Nat_rewrite.set_smac ether (PRI.mac nf) in
-      let (just_headers, higherlevel_data) =
-        Nat_rewrite.recalculate_transport_checksum (I.checksum) (ether, ip, tx)
-      in
-      I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
+      try_lwt
+        let ether = Nat_rewrite.set_smac ether (PRI.mac nf) in
+        let (just_headers, higherlevel_data) =
+          Nat_rewrite.recalculate_transport_checksum (IPV4.checksum) (ether, ip, tx)
+        in
+        IPV4.writev i just_headers [ higherlevel_data ]
+      with
+      | IPV4.Routing.No_route_to_destination_address _addr ->
+      (* clients may go offline with connections still in process; this
+         shouldn't cause the NAT device to go offline *)
+      return_unit
   done
 
-let start c pri sec fs http =
+let start c _random pri sec fs http =
   let module Http_server = struct
   include HTTP
 
