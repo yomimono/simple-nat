@@ -7,18 +7,19 @@ module Date = struct
 end
 
 
-module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) (KV : KV_RO)
+module Main (C: CONSOLE) (Random: V1.RANDOM) (PRI: NETWORK) (SEC: NETWORK) (KV : KV_RO)
     (HTTP: Cohttp_lwt.Server) = struct
 
-  module ETH = Ethif.Make(PRI)
-  module A = Arpv4.Make(ETH)(Clock)(OS.Time)
-  module I = Ipv4.Make(ETH)(A)
   module Backend = Irmin_mem.Make
   module Mem_table = Nat_lookup.Make(Backend)
   module Nat = Nat_rewrite.Make(Mem_table)
+
+  module ETH = Ethif.Make(PRI)
+  module A = Irmin_arp.Arp.Make(ETH)(Clock)(OS.Time)(Random)(Backend)
+  module IPV4 = Ipv4.Make(ETH)(A)
   type direction = Nat_rewrite.direction
 
-  let listen nf arp push =
+  let listen nf arp table push =
     (* ingest packets *)
     PRI.listen nf
       (fun frame ->
@@ -116,6 +117,8 @@ let start c pri sec fs http =
   let (sec_in_queue, sec_in_push) = Lwt_stream.create () in
   let (sec_out_queue, sec_out_push) = Lwt_stream.create () in
 
+  let arp_config = Irmin_mem.config () in
+
   (* or_error brazenly stolen from netif-forward *)
   let or_error c name fn t =
     fn t
@@ -138,31 +141,28 @@ let start c pri sec fs http =
   lwt nf1 = or_error c "primary interface" ETH.connect pri in
   lwt nf2 = or_error c "secondary interface" ETH.connect sec in
 
-  lwt arp1 = or_error c "primary arp layer" A.connect nf1 in
-  lwt arp2 = or_error c "secondary arp layer" A.connect nf2 in
+  A.connect nf1 arp_config ~pull:[] ~node:["arp";"primary"] >>= function
+  | `Error e -> fail (Failure ("error starting arp"))
+  | `Ok arp1 ->
+  A.connect nf2 arp_config ~pull:[] ~node:["arp";"secondary"] >>= function
+  | `Error e -> fail (Failure ("error starting arp"))
+  | `Ok arp2 ->
 
   (* set up ipv4 on interfaces so ARP will be answered *)
-  lwt ext_i = or_error c "ip for primary interface" (I.connect nf1) arp1 in
-  lwt int_i = or_error c "ip for secondary interface" (I.connect nf2) arp2 in
-  I.set_ip ext_i external_ip >>= fun () ->
-  I.set_ip_netmask ext_i external_netmask >>= fun () ->
-  I.set_ip int_i internal_ip >>= fun () ->
-  I.set_ip_netmask int_i internal_netmask >>= fun () ->
-  I.set_ip_gateways ext_i [ external_gateway ] >>= fun () ->
+  lwt ext_i = or_error c "ip for primary interface" (IPV4.connect nf1) arp1 in
+  lwt int_i = or_error c "ip for secondary interface" (IPV4.connect nf2) arp2 in
+  IPV4.set_ip ext_i external_ip >>= fun () ->
+  IPV4.set_ip_netmask ext_i external_netmask >>= fun () ->
+  IPV4.set_ip int_i internal_ip >>= fun () ->
+  IPV4.set_ip_netmask int_i internal_netmask >>= fun () ->
+  IPV4.set_ip_gateways ext_i [ external_gateway ] >>= fun () ->
 
   Mem_table.empty () >>= fun nat_t ->
-
-  C.log c (Printf.sprintf "NATting from external ip %s to internal ip %s in direction
-  Destination (default deny)" (Ipaddr.V4.to_string external_ip) (Ipaddr.V4.to_string
-                                                                internal_ip));
-  C.log c (Printf.sprintf "NATting from external ip %s to internal ip %s in direction Source
-  (default allow)" (Ipaddr.V4.to_string external_ip) (Ipaddr.V4.to_string
-                                                     internal_ip));
-
+  
   Lwt.choose [
     (* packet intake *)
-    (listen pri arp1 pri_in_push);
-    (listen sec arp2 sec_in_push);
+    (listen pri arp1 nat_t pri_in_push);
+    (listen sec arp2 nat_t sec_in_push);
 
     (* TODO: ICMP, at least on our own behalf *)
 
@@ -182,9 +182,8 @@ let start c pri sec fs http =
     (send_packets c pri ext_i pri_out_queue);
     (send_packets c sec int_i sec_out_queue);
 
-    (* HTTP server on management interface *)
-    Server.listen (Mem_table.store_of_t nat_t) (Uri.of_string
-                                                  "http://localhost:80")
+    (* HTTP server on management interface. *)
+    Server.listen (Mem_table.store_of_t nat_t) (Uri.of_string "http://localhost:80")
   ]
 
 end
