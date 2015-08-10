@@ -1,6 +1,6 @@
 open Mirage
 
-let main = foreign "Simple_nat.Main" (console @-> network @-> network @->
+let main = foreign "Simple_nat.Main" (console @-> random @-> network @-> network @->
                                       kv_ro @-> http @-> job)
 
 let console = default_console
@@ -22,9 +22,10 @@ let secondary_netif = (netif "2")
 let fs = crunch "static"
 
 let () =
-  add_to_opam_packages ["mirage-nat";"irmin";"re";"tcpip";"mirage-profile"];
+  add_to_opam_packages
+    ["mirage-nat";"irmin";"re";"tcpip";"mirage-profile";"irmin-arp"];
   add_to_ocamlfind_libraries ["mirage-nat";"re.str";"irmin.http";
-                              "tcpip.arpv4";"tcpip.ethif";"tcpip.ipv4";"mirage-profile"];
+                              "irmin-arp";"tcpip.ethif";"tcpip.ipv4";"mirage-profile"];
   register "simple-nat" [
-    main $ console $ primary_netif $ secondary_netif $ fs $ http
+    main $ console $ default_random $ primary_netif $ secondary_netif $ fs $ http
   ]
