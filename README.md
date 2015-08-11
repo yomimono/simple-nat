@@ -9,8 +9,8 @@ opam pin add tcpip https://github.com/yomimono/mirage-tcpip.git#expose_routing_e
 Additionally, there are some dependencies which are not available in the main OPAM repository.  They can be installed as follows:
 
 ```
-opam pin add mirage-nat https://github.com/yomimono/mirage-nat.git
 opam pin add irmin-network-datastores https://github.com/yomimono/irmin-network-datastores.git
+opam pin add mirage-nat https://github.com/yomimono/mirage-nat.git
 opam pin add irmin-arp https://github.com/yomimono/irmin-arp.git
 ```
 
