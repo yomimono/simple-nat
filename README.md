@@ -1,3 +1,9 @@
+## What Is This?
+
+`simple-nat` is a [MirageOS](https://mirage.io) project that provides a NAT device with storage backed by [Irmin](https://github.com/mirage/irmin).  The NAT table is exposed by an Irmin HTTP server and can be manipulated by Irmin's command-line tools, in addition to the automatic updates which are triggered by normal operation of the NAT device.
+
+For more background, see the [irmin-arp](https://github.com/yomimono/irmin-arp) documentation.
+
 ### Prepare
 
 Currently, a pinned version of `tcpip` is required to run the NAT device.  Get it as follows:
