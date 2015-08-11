@@ -19,9 +19,19 @@ opam pin add irmin-arp https://github.com/yomimono/irmin-arp.git
 opam pin add lwt 'https://github.com/mirage/lwt.git#tracing
 ```
 
+You'll need `mirage` itself as well:
+
+```
+opam install mirage
+```
+
 ### Compile
 
 ```
 mirage configure --xen # for a virtual machine
 make
 ```
+
+### Run
+
+For an example configuration and invocation of the NAT device, see `multibridge.xl` and `multibridge.sh`.
