@@ -6,6 +6,12 @@ Currently, a pinned version of `tcpip` is required to run the NAT device.  Get i
 opam pin add tcpip https://github.com/yomimono/mirage-tcpip.git#expose_routing_exn
 ```
 
+Also, patched versions of some libraries are required; the easiest way to get them all is by adding the `mirage-dev` remote in opam:
+
+```
+opam remote add mirage-dev https://github.com/mirage/mirage-dev.git
+```
+
 Additionally, there are some dependencies which are not available in the main OPAM repository.  They can be installed as follows:
 
 ```
