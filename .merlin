@@ -1,2 +1,5 @@
 EXT lwt
+PKG irmin
+PKG cohttp
+PKG lwt
 PKG lwt.syntax

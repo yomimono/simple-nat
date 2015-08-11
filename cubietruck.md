@@ -55,16 +55,17 @@ wlan0: AP-ENABLED
 sudo brctl addbr br1
 ```
 
-* add the wireless interface to the new network bridge:
+* add the wireless interface to the new network bridge and set its link to be up:
 
 ```
 sudo brctl addif br1 wlan0
+sudo ip link set br1 up
 ```
 
 * set up a static network on the new bridge.  I chose a 192.168 network that's unlikely to collide with other networks in use, but you may wish to use something else (particularly if you happen to be using a network with the same addressing to configure the CubieBoard!); if so, you'll need to change it here and in the step below where you configure `dnsmasq.conf`.
 
 ```
-sudo ip addr add 192.168.252.1/24 dev br0
+sudo ip addr add 192.168.252.1/24 dev br1
 ```
 
 * pick a MAC address for your unikernel.  In this example, I'll use the default mirage autoconfigured one, `c0:ff:ee:c0:ff:ee`.
@@ -92,14 +93,7 @@ sudo dnsmasq
 
 ## Mirage and Unikernel Config
 
-* download and build simple-nat:
-```
-opam pin add mirage-nat https://github.com/yomimono/mirage-nat
-git clone https://github.com/yomimono/simple-nat
-cd simple-nat
-mirage configure --xen
-make
-```
+* follow the instructions in README.md for compiling simple-nat and initiating a unikernel build
 
 * get a cup of your preferred beverage, respond to your e-mail, etc while the unikernel and its dependencies compile
 
