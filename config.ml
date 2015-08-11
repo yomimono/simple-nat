@@ -1,7 +1,7 @@
 open Mirage
 
 let main = foreign "Simple_nat.Main" (console @-> random @-> network @-> network @->
-                                      kv_ro @-> http @-> job)
+                                      http @-> job)
 
 let console = default_console
 
@@ -27,5 +27,5 @@ let () =
   add_to_ocamlfind_libraries ["mirage-nat";"re.str";"irmin.http";
                               "irmin-arp";"tcpip.ethif";"tcpip.ipv4";"mirage-profile"];
   register "simple-nat" [
-    main $ console $ default_random $ primary_netif $ secondary_netif $ fs $ http
+    main $ console $ default_random $ primary_netif $ secondary_netif $ http
   ]

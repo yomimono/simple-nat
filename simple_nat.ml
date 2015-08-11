@@ -7,7 +7,7 @@ module Date = struct
 end
 
 
-module Main (C: CONSOLE) (Random: V1.RANDOM) (PRI: NETWORK) (SEC: NETWORK) (KV : KV_RO)
+module Main (C: CONSOLE) (Random: V1.RANDOM) (PRI: NETWORK) (SEC: NETWORK)
     (HTTP: Cohttp_lwt.Server) = struct
 
   module Backend = Irmin_mem.Make
@@ -106,7 +106,7 @@ let send_packets c nf i out_queue =
       return_unit
   done
 
-let start c _random pri sec fs http =
+let start c _random pri sec http =
   let module Http_server = struct
   include HTTP
 
