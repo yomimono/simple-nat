@@ -93,14 +93,7 @@ sudo dnsmasq
 
 ## Mirage and Unikernel Config
 
-* download and build simple-nat:
-```
-opam pin add mirage-nat https://github.com/yomimono/mirage-nat
-git clone https://github.com/yomimono/simple-nat
-cd simple-nat
-mirage configure --xen
-make
-```
+* follow the instructions in README.md for compiling simple-nat and initiating a unikernel build
 
 * get a cup of your preferred beverage, respond to your e-mail, etc while the unikernel and its dependencies compile
 
