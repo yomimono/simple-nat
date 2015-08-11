@@ -1,9 +1,8 @@
 open V1_LWT
 open Lwt
 
-(* does ptime do something like int64 -> string? *)
 module Date = struct
-  let pretty _ = "a long long time ago"
+  let pretty date = Int64.to_string date
 end
 
 
