@@ -19,7 +19,7 @@ module Main (C: CONSOLE) (Random: V1.RANDOM) (PRI: NETWORK) (SEC: NETWORK)
   module IPV4 = Ipv4.Make(ETH)(A)
   type direction = Nat_rewrite.direction
 
-  let listen nf arp table push =
+  let listen nf arp push =
     (* ingest packets *)
     PRI.listen nf
       (fun frame ->
@@ -167,8 +167,8 @@ let start c _random pri sec http =
   
   Lwt.choose [
     (* packet intake *)
-    (listen pri arp1 nat_t pri_in_push);
-    (listen sec arp2 nat_t sec_in_push);
+    (listen pri arp1 pri_in_push);
+    (listen sec arp2 sec_in_push);
 
     (* TODO: ICMP, at least on our own behalf *)
 
