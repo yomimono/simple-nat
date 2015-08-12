@@ -6,11 +6,16 @@ module Date = struct
 end
 
 
-module Main (C: CONSOLE) (Random: V1.RANDOM) (PRI: NETWORK) (SEC: NETWORK)
+module Main (C: CONSOLE) (Random: V1.RANDOM) (Clock : V1.CLOCK)
+    (PRI: NETWORK) (SEC: NETWORK)
     (HTTP: Cohttp_lwt.Server) = struct
 
+  module Nat_clock = struct
+    let now () = Int64.of_float (Clock.time ())
+  end
+
   module Backend = Irmin_mem.Make
-  module Mem_table = Nat_lookup.Make(Backend)
+  module Mem_table = Nat_lookup.Make(Backend)(Nat_clock)(OS.Time)
   module Nat = Nat_rewrite.Make(Mem_table)
 
   module ETH = Ethif.Make(PRI)
@@ -105,7 +110,7 @@ let send_packets c nf i out_queue =
       return_unit
   done
 
-let start c _random pri sec http =
+let start c _random _clock pri sec http =
   let module Http_server = struct
   include HTTP
 
@@ -162,7 +167,7 @@ let start c _random pri sec http =
   IPV4.set_ip_netmask int_i internal_netmask >>= fun () ->
   IPV4.set_ip_gateways ext_i [ external_gateway ] >>= fun () ->
 
-  Mem_table.empty () >>= fun nat_t ->
+  Mem_table.empty (Irmin_mem.config ()) >>= fun nat_t ->
   
   Lwt.choose [
     (* packet intake *)
