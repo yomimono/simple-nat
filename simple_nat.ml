@@ -15,7 +15,7 @@ module Main (C: CONSOLE) (Random: V1.RANDOM) (Clock : V1.CLOCK)
   end
 
   module Backend = Irmin_mem.Make
-  module Mem_table = Nat_lookup.Make(Backend)(Nat_clock)
+  module Mem_table = Nat_lookup.Make(Backend)(Nat_clock)(OS.Time)
   module Nat = Nat_rewrite.Make(Mem_table)
 
   module ETH = Ethif.Make(PRI)
@@ -167,7 +167,7 @@ let start c _random _clock pri sec http =
   IPV4.set_ip_netmask int_i internal_netmask >>= fun () ->
   IPV4.set_ip_gateways ext_i [ external_gateway ] >>= fun () ->
 
-  Mem_table.empty () >>= fun nat_t ->
+  Mem_table.empty (Irmin_mem.config ()) >>= fun nat_t ->
   
   Lwt.choose [
     (* packet intake *)
