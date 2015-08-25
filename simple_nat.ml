@@ -2,18 +2,20 @@ open V1_LWT
 open Lwt
 open Nat_rewrite
 
-module Main (C: CONSOLE) (PRI: NETWORK) (SEC: NETWORK) = struct
+module Main (C: CONSOLE) (Clock: V1.CLOCK) (Time: V1_LWT.TIME)
+  (PRI: NETWORK) (SEC: NETWORK) = struct
 
-  module ETH = Ethif.Make(PRI)
-  module I = Ipv4.Make(ETH)
+module ETH = Ethif.Make(PRI)
+  module A = Arpv4.Make(ETH)(Clock)(Time)
+  module I = Ipv4.Make(ETH)(A)
   type direction = Nat_rewrite.direction
 
-  let listen nf i push =
+  let listen nf a push =
     (* ingest packets *)
     PRI.listen nf
       (fun frame ->
          match (Wire_structs.get_ethernet_ethertype frame) with
-         | 0x0806 -> I.input_arpv4 i frame
+         | 0x0806 -> A.input a (Cstruct.shift frame (Wire_structs.sizeof_ethernet))
          | _ -> return (push (Some frame)))
 
   let allow_nat_traffic table frame ip =
@@ -70,7 +72,7 @@ let send_packets c nf i out_queue =
       I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
   done
 
-let start c pri sec =
+let start c _clock _time pri sec =
 
   let (pri_in_queue, pri_in_push) = Lwt_stream.create () in
   let (pri_out_queue, pri_out_push) = Lwt_stream.create () in
@@ -99,9 +101,12 @@ let start c pri sec =
   lwt nf1 = or_error c "primary interface" ETH.connect pri in
   lwt nf2 = or_error c "secondary interface" ETH.connect sec in
 
+  lwt arp1 = or_error c "primary arp" A.connect nf1 in
+  lwt arp2 = or_error c "primary arp" A.connect nf2 in
+
   (* set up ipv4 on interfaces so ARP will be answered *)
-  lwt ext_i = or_error c "ip for primary interface" I.connect nf1 in
-  lwt int_i = or_error c "ip for secondary interface" I.connect nf2 in
+  lwt ext_i = or_error c "ip for primary interface" (I.connect nf1) arp1 in
+  lwt int_i = or_error c "ip for secondary interface" (I.connect nf2) arp2 in
   I.set_ip ext_i external_ip >>= fun () ->
   I.set_ip_netmask ext_i external_netmask >>= fun () ->
   I.set_ip int_i internal_ip >>= fun () ->
@@ -116,8 +121,8 @@ let start c pri sec =
 
   Lwt.choose [
     (* packet intake *)
-    (listen pri ext_i pri_in_push);
-    (listen sec int_i sec_in_push);
+    (listen pri arp1 pri_in_push);
+    (listen sec arp2 sec_in_push);
 
     (* TODO: ICMP, at least on our own behalf *)
 
