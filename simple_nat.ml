@@ -5,7 +5,6 @@ module Date = struct
   let pretty date = Int64.to_string date
 end
 
-
 module Main (C: CONSOLE) (Random: V1.RANDOM) (Clock : V1.CLOCK)
     (PRI: NETWORK) (SEC: NETWORK)
     (HTTP: Cohttp_lwt.Server) = struct
@@ -15,13 +14,12 @@ module Main (C: CONSOLE) (Random: V1.RANDOM) (Clock : V1.CLOCK)
   end
 
   module Backend = Irmin_mem.Make
-  module Mem_table = Nat_lookup.Make(Backend)(Nat_clock)(OS.Time)
-  module Nat = Nat_rewrite.Make(Mem_table)
+  module Nat = Nat_rewrite.Make(Backend)(Nat_clock)(OS.Time)
 
   module ETH = Ethif.Make(PRI)
   module A = Irmin_arp.Arp.Make(ETH)(Clock)(OS.Time)(Random)(Backend)
   module IPV4 = Ipv4.Make(ETH)(A)
-  type direction = Nat_rewrite.direction
+  type direction = Nat_types.direction
 
   let listen nf arp push =
     (* ingest packets *)
@@ -31,16 +29,18 @@ module Main (C: CONSOLE) (Random: V1.RANDOM) (Clock : V1.CLOCK)
          | 0x0806 -> A.input arp (Cstruct.shift frame 14)
          | _ -> return (push (Some frame)))
 
-  let allow_nat_traffic table frame ip =
-    let rec stubborn_insert table frame ip port = match port with
+  let allow_nat_traffic table frame (ip : Ipaddr.t) =
+    let rec stubborn_insert table frame ip port =
+      match port with
       (* TODO: in the unlikely event that no port is available, this
          function will never terminate (this is really a tcpip todo) *)
       | n when n < 1024 ->
         stubborn_insert table frame ip (Random.int 65535)
       | n ->
         let open Nat in
-        make_nat_entry table frame ip n >>= function
-        | Ok t -> Lwt.return (Some t)
+        let endpoint : Nat_types.endpoint = (ip, n) in
+        add_nat table frame endpoint >>= function
+        | Ok -> Lwt.return (Some ())
         | Unparseable -> Lwt.return None
         | Overlap -> stubborn_insert table frame ip (Random.int 65535)
     in
@@ -56,9 +56,8 @@ module Main (C: CONSOLE) (Random: V1.RANDOM) (Clock : V1.CLOCK)
                              fwd_port (Random.int 65535)
       | n ->
         let open Nat in
-        make_redirect_entry table frame (other_ip, n)
-          (client_ip, fwd_port) >>= function
-        | Ok t -> Lwt.return (Some t)
+        add_redirect table frame (other_ip, n) (client_ip, fwd_port) >>= function
+        | Ok -> Lwt.return (Some ())
         | Unparseable -> Lwt.return None
         | Overlap -> stubborn_insert table frame other_ip client_ip
                        fwd_port (Random.int 65535)
@@ -68,18 +67,18 @@ module Main (C: CONSOLE) (Random: V1.RANDOM) (Clock : V1.CLOCK)
   let nat translation_ip nat_table (direction : direction)
       in_queue out_push =
     let rec frame_wrapper frame =
+      let open Nat_types in
       (* typical NAT logic: traffic from the internal "trusted" interface gets
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
       Nat.translate nat_table direction frame >>= fun result ->
       match direction, result with
-      | Destination, None -> Lwt.return_unit (* nothing in the table, drop it *)
-      | _, Some f ->
-        return (out_push (Some f))
-      | Source, None ->
+      | Source, Translated | Destination, Translated -> return (out_push (Some frame))
+      | Destination, Untranslated -> Lwt.return_unit (* nothing in the table, drop it *)
+      | Source, Untranslated ->
         (* mutate nat_table to include entries for the frame *)
         allow_nat_traffic nat_table frame translation_ip >>= function
-        | Some t ->
+        | Some () ->
           (* try rewriting again; we should now have an entry for this packet *)
           frame_wrapper frame
         | None ->
@@ -104,10 +103,12 @@ let send_packets c nf i out_queue =
         in
         IPV4.writev i just_headers [ higherlevel_data ]
       with
-      | IPV4.Routing.No_route_to_destination_address _addr ->
-      (* clients may go offline with connections still in process; this
-         shouldn't cause the NAT device to go offline *)
-      return_unit
+      | IPV4.Routing.No_route_to_destination_address addr ->
+        (* clients may go offline with connections still in process; this
+           shouldn't cause the NAT device to go offline *)
+        C.log c ("ARP resolution failed - dropping packet for " ^
+                 (Ipaddr.V4.to_string addr));
+        return_unit
   done
 
 let start c _random _clock pri sec http =
@@ -120,7 +121,7 @@ let start c _random _clock pri sec http =
   end
   in
 
-  let module Server = Irmin_http_server.Make(Http_server)(Date)(Mem_table.I) in
+  let module Nat_server = Irmin_http_server.Make(Http_server)(Date)(Nat.I) in
 
   let (pri_in_queue, pri_in_push) = Lwt_stream.create () in
   let (pri_out_queue, pri_out_push) = Lwt_stream.create () in
@@ -167,7 +168,7 @@ let start c _random _clock pri sec http =
   IPV4.set_ip_netmask int_i internal_netmask >>= fun () ->
   IPV4.set_ip_gateways ext_i [ external_gateway ] >>= fun () ->
 
-  Mem_table.empty (Irmin_mem.config ()) >>= fun nat_t ->
+  Nat.empty (Irmin_mem.config ()) >>= fun nat_t ->
   
   Lwt.choose [
     (* packet intake *)
@@ -192,8 +193,12 @@ let start c _random _clock pri sec http =
     (send_packets c pri ext_i pri_out_queue);
     (send_packets c sec int_i sec_out_queue);
 
-    (* HTTP server on management interface. *)
-    Server.listen (Mem_table.store_of_t nat_t) (Uri.of_string "http://localhost:80")
+    (* Expose the NAT table via an Irmin HTTP server on the fully-configured
+       stack passed to `start`.  By default this will be exposed on the
+       "external" bridge, but can be changed to the internal bridge to more fully
+       mimic a typical edge network by moving the third vif to xenbr1 -- see
+       multibridge.xl for a fuller example.  *)
+    Nat_server.listen (Nat.store_of_t nat_t) (Uri.of_string "http://localhost:80");
   ]
 
 end
