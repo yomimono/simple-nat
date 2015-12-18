@@ -6,13 +6,7 @@ For more background, see the [irmin-arp](https://github.com/yomimono/irmin-arp) 
 
 ### Prepare
 
-Currently, a pinned version of `tcpip` is required to run the NAT device.  Get it as follows:
-
-```
-opam pin add tcpip https://github.com/yomimono/mirage-tcpip.git#expose_routing_exn
-```
-
-Pinned versions of `dolog` and `bin_prot` are also necessary to run applications using Irmin as unikernels.  Get them here:
+Currently, pinned versions of `dolog` and `bin_prot` are necessary to run applications using Irmin as unikernels.  Get them here:
 
 ```
 opam pin add dolog https://github.com/unixjunkie/dolog.git#no_unix
