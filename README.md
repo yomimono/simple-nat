@@ -29,7 +29,7 @@ opam pin add irmin-arp https://github.com/yomimono/irmin-arp.git
 
 (optional)
 ```
-opam pin add lwt 'https://github.com/mirage/lwt.git#tracing
+opam pin add lwt https://github.com/mirage/lwt.git#tracing
 ```
 
 You'll need `mirage` itself as well:
