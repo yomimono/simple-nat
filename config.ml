@@ -1,6 +1,23 @@
 open Mirage
 
-let main = foreign "Simple_nat.Main" (console @-> clock @-> time @-> network @-> network @-> job)
+let arg name opt =
+  Key.create name @@ Key.Arg.required Key.Arg.string (Key.Arg.info [opt])
+
+let external_ip = arg "external_ip" "external-ip"
+let internal_ip = arg "internal_ip" "internal-ip"
+let internal_netmask = arg "internal_netmask" "internal-netmask"
+let external_gateway = arg "external_gateway" "external-gateway"
+let external_netmask = arg "external_netmask" "external-netmask"
+
+let keys = Key.[
+  abstract external_ip;
+  abstract internal_ip;
+  abstract external_netmask;
+  abstract internal_netmask;
+  abstract external_gateway;
+]
+
+let main = foreign "Simple_nat.Main" ~keys (console @-> clock @-> time @-> network @-> network @-> job)
 
 let primary_netif = (netif "0")
 let secondary_netif = (netif "1") (* netif actually needs an integer, shoved

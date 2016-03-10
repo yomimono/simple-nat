@@ -73,10 +73,9 @@ let send_packets c nf i (out_queue : Cstruct.t Lwt_stream.t) =
 
     match Nat_decompose.layers frame with
     | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
-    | Some (ether, ip, tx, payload) ->
-      let ether = Nat_decompose.set_smac ether (PRI.mac nf) in
+    | Some (ip, tx, payload) ->
       let (just_headers, higherlevel_data) =
-        Nat_decompose.finalize_packet (ether, ip, tx, payload)
+        Nat_decompose.finalize_packet (ip, tx, payload)
       in
       I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
   done
@@ -98,13 +97,12 @@ let or_error c name fn t =
 in
 
 (* get network configuration from bootvars *)
-Bootvar.create >>= fun bootvar ->
-let try_bootvar key = Ipaddr.V4.of_string_exn (Bootvar.get bootvar key) in
-let internal_ip = try_bootvar "internal_ip" in
-let internal_netmask = try_bootvar "internal_netmask" in
-let external_ip = try_bootvar "external_ip" in
-let external_netmask = try_bootvar "external_netmask" in
-let external_gateway = try_bootvar "external_gateway" in
+let fix = Ipaddr.V4.of_string_exn in
+let internal_ip = fix @@ Key_gen.internal_ip () in
+let internal_netmask = fix @@ Key_gen.internal_netmask () in
+let external_ip = fix @@ Key_gen.external_ip () in
+let external_netmask = fix @@ Key_gen.external_netmask () in
+let external_gateway = fix @@ Key_gen.external_gateway () in
 
 (* initialize interfaces *)
 lwt nf1 = or_error c "primary interface" ETH.connect pri in
