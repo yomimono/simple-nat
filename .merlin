@@ -1,2 +1,2 @@
-EXT lwt functoria mirage
+EXT lwt functoria mirage tcpip
 PKG lwt.syntax

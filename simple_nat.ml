@@ -8,21 +8,22 @@ module Main (C: CONSOLE) (Clock: V1.CLOCK) (Time: V1_LWT.TIME)
     let now () = Clock.time () |> Int64.of_float
   end
 
-module Nat_rewrite = Mirage_nat_hashtable.Make(Nat_clock)(Time)
+  module Nat_rewrite = Mirage_nat_hashtable.Make(Nat_clock)(Time)
 
-module ETH = Ethif.Make(PRI)
+  module ETH = Ethif.Raw(PRI)
   module A = Arpv4.Make(ETH)(Clock)(Time)
   module I = Ipv4.Make(ETH)(A)
 
   type direction = | Source | Destination
 
-  let listen nf a push =
+  let listen netif ethif a push =
     (* ingest packets *)
-    PRI.listen nf
-      (fun frame ->
-         match (Wire_structs.get_ethernet_ethertype frame) with
-         | 0x0806 -> A.input a (Cstruct.shift frame (Wire_structs.sizeof_ethernet))
-         | _ -> return (push (Some frame)))
+    PRI.listen netif
+      (ETH.input ethif
+        ~arpv4:(A.input a)
+        ~ipv4:(fun frame -> push (Some frame); return_unit)
+        ~ipv6:(fun _ -> return_unit)
+      )
 
   let allow_nat_traffic table frame ip =
     let rec stubborn_insert table frame ip port = match port with
@@ -42,29 +43,29 @@ module ETH = Ethif.Make(PRI)
 
   let nat external_ip internal_ip nat_table (direction : direction)
       in_queue out_push =
-    let rec frame_wrapper frame =
+    let rec aux ip =
       let open Mirage_nat in
       (* typical NAT logic: traffic from the internal "trusted" interface gets
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
-      Nat_rewrite.translate nat_table frame >>= fun f ->
+      Nat_rewrite.translate nat_table ip >>= fun f ->
       match direction, f with
       | Destination, Untranslated -> 
         Lwt.return_unit (* nothing in the table, drop it *)
       | _, Translated ->
-        return (out_push (Some frame))
+        return (out_push (Some (Nat_decompose.finalize_packet ip)))
       | Source, Untranslated ->
         (* mutate nat_table to include entries for the frame *)
         allow_nat_traffic nat_table frame external_ip >>= function
         | Some () ->
           (* try rewriting again; we should now have an entry for this packet *)
-          frame_wrapper frame
+          aux ip
         | None ->
           (* this frame is hopeless! *)
           return_unit
     in
     while_lwt true do
-      Lwt_stream.next in_queue >>= frame_wrapper
+      Lwt_stream.next in_queue >>= aux
     done
 
 let send_packets c nf i (out_queue : Cstruct.t Lwt_stream.t) =
@@ -73,11 +74,12 @@ let send_packets c nf i (out_queue : Cstruct.t Lwt_stream.t) =
 
     match Nat_decompose.layers frame with
     | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
-    | Some (ip, tx, payload) ->
-      let (just_headers, higherlevel_data) =
-        Nat_decompose.finalize_packet (ip, tx, payload)
-      in
-      I.writev i just_headers [ higherlevel_data ] >>= fun () -> return_unit
+    | Some ip_packet ->
+      let dst = Wire_structs.Ipv4_wire.get_ipv4_dst in
+      A.query a dst >>= function
+      | None -> return_unit
+      | Some dst ->
+      Eth.output ~dst ~proto:`IPv4 ip_packet
   done
 
 let start c _clock _time pri sec =
@@ -105,15 +107,15 @@ let external_netmask = fix @@ Key_gen.external_netmask () in
 let external_gateway = fix @@ Key_gen.external_gateway () in
 
 (* initialize interfaces *)
-lwt nf1 = or_error c "primary interface" ETH.connect pri in
-lwt nf2 = or_error c "secondary interface" ETH.connect sec in
+lwt ethif1 = or_error c "primary interface" ETH.connect pri in
+lwt ethif2 = or_error c "secondary interface" ETH.connect sec in
 
-lwt arp1 = or_error c "primary arp" A.connect nf1 in
-lwt arp2 = or_error c "primary arp" A.connect nf2 in
+lwt arp1 = or_error c "primary arp" A.connect ethif1 in
+lwt arp2 = or_error c "primary arp" A.connect ethif2 in
 
 (* set up ipv4 on interfaces so ARP will be answered *)
-lwt ext_i = or_error c "ip for primary interface" (I.connect nf1) arp1 in
-lwt int_i = or_error c "ip for secondary interface" (I.connect nf2) arp2 in
+lwt ext_i = or_error c "ip for primary interface" (I.connect ethif1) arp1 in
+lwt int_i = or_error c "ip for secondary interface" (I.connect ethif2) arp2 in
 I.set_ip ext_i external_ip >>= fun () ->
 I.set_ip_netmask ext_i external_netmask >>= fun () ->
 I.set_ip int_i internal_ip >>= fun () ->
@@ -125,8 +127,8 @@ Nat_rewrite.empty () >>= fun nat_t ->
 
   Lwt.choose [
     (* packet intake *)
-    (listen pri arp1 pri_in_push);
-    (listen sec arp2 sec_in_push);
+    (listen pri ethif1 arp1 pri_in_push);
+    (listen sec ethif2 arp2 sec_in_push);
 
     (* TODO: ICMP, at least on our own behalf *)
 
