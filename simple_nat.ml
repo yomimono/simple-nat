@@ -53,10 +53,10 @@ module Main (C: CONSOLE) (Clock: V1.CLOCK) (Time: V1_LWT.TIME)
       | Destination, Untranslated -> 
         Lwt.return_unit (* nothing in the table, drop it *)
       | _, Translated ->
-        return (out_push (Some (Nat_decompose.finalize_packet ip)))
+        return (out_push (Some ip))
       | Source, Untranslated ->
         (* mutate nat_table to include entries for the frame *)
-        allow_nat_traffic nat_table frame external_ip >>= function
+        allow_nat_traffic nat_table ip external_ip >>= function
         | Some () ->
           (* try rewriting again; we should now have an entry for this packet *)
           aux ip
@@ -68,18 +68,22 @@ module Main (C: CONSOLE) (Clock: V1.CLOCK) (Time: V1_LWT.TIME)
       Lwt_stream.next in_queue >>= aux
     done
 
-let send_packets c nf i (out_queue : Cstruct.t Lwt_stream.t) =
+let send_packets c e a out_queue =
+  let open Ipaddr in
   while_lwt true do
-    lwt frame = Lwt_stream.next out_queue in
-
-    match Nat_decompose.layers frame with
+    Lwt_stream.next out_queue >>= fun ip ->
+    match Nat_decompose.layers ip with
     | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
-    | Some ip_packet ->
-      let dst = Wire_structs.Ipv4_wire.get_ipv4_dst in
-      A.query a dst >>= function
-      | None -> return_unit
-      | Some dst ->
-      Eth.output ~dst ~proto:`IPv4 ip_packet
+    | Some ((ip_packet, _, _) as bundle) ->
+      match Nat_decompose.addresses_of_ip ip_packet with
+      | _, (V6 dst) ->
+        (* TODO: lookup dst mac for ipv6 and emit *)
+        Lwt.return_unit
+      | _, (V4 dst) ->
+        A.query a dst >>= function
+        | `Timeout -> return_unit
+        | `Ok dst ->
+          ETH.output e ~dst ~proto:`IPv4 @@ Nat_decompose.finalize_packet bundle
   done
 
 let start c _clock _time pri sec =
@@ -145,8 +149,8 @@ Nat_rewrite.empty () >>= fun nat_t ->
     (nat (Ipaddr.V4 external_ip) (Ipaddr.V4 internal_ip) nat_t Destination pri_in_queue sec_out_push);
 
     (* packet output *)
-    (send_packets c pri ext_i pri_out_queue);
-    (send_packets c sec int_i sec_out_queue)
+    (send_packets c ethif1 arp1 pri_out_queue);
+    (send_packets c ethif2 arp2 sec_out_queue)
   ]
 
 end
