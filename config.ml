@@ -22,8 +22,7 @@ let main = foreign "Simple_nat.Main" ~keys (console @-> clock @-> time @-> netwo
 let primary_netif = (netif "0")
 let secondary_netif = (netif "1") (* netif actually needs an integer, shoved
 into a string, which maps to a device ID number assigned by Xen, to do anything
-helpful when xen is the target.  Stuff that can't be turned into an int
-is silently dropped in that case and we just get the first Xen network iface. *)
+helpful when xen is the target. *)
 (* 
 let tracing = mprof_trace ~size:100000 () *)
 
