@@ -43,7 +43,7 @@ module Main (C: CONSOLE) (Clock: V1.CLOCK) (Time: V1_LWT.TIME)
 
   let nat external_ip internal_ip nat_table (direction : direction)
       in_queue out_push =
-    let rec aux ip =
+    let aux ip =
       let open Mirage_nat in
       (* typical NAT logic: traffic from the internal "trusted" interface gets
          new mappings by default; traffic from other interfaces gets dropped if
@@ -53,7 +53,7 @@ module Main (C: CONSOLE) (Clock: V1.CLOCK) (Time: V1_LWT.TIME)
       | Destination, Untranslated -> 
         Lwt.return_unit (* nothing in the table, drop it *)
       | _, Translated ->
-        return (out_push (Some (Nat_decompose.finalize_packet ip)))
+        return (out_push (Some ip))
       | Source, Untranslated ->
         (* mutate nat_table to include entries for the frame *)
         allow_nat_traffic nat_table frame external_ip >>= function
@@ -64,15 +64,14 @@ module Main (C: CONSOLE) (Clock: V1.CLOCK) (Time: V1_LWT.TIME)
           (* this frame is hopeless! *)
           return_unit
     in
-    while_lwt true do
-      Lwt_stream.next in_queue >>= aux
-    done
+    let rec process () =
+      Lwt_stream.next in_queue >>= aux >>= process
+    in
+    process ()
 
 let send_packets c nf i (out_queue : Cstruct.t Lwt_stream.t) =
-  while_lwt true do
-    lwt frame = Lwt_stream.next out_queue in
-
-    match Nat_decompose.layers frame with
+  let aux frame =
+    match Nat_decompose.decompose frame with
     | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
     | Some ip_packet ->
       let dst = Wire_structs.Ipv4_wire.get_ipv4_dst in
@@ -80,7 +79,11 @@ let send_packets c nf i (out_queue : Cstruct.t Lwt_stream.t) =
       | None -> return_unit
       | Some dst ->
       Eth.output ~dst ~proto:`IPv4 ip_packet
-  done
+  in
+  let rec process () =
+    Lwt_stream.next out_queue >>= aux >>= process
+  in
+  process ()
 
 let start c _clock _time pri sec =
 
@@ -107,15 +110,15 @@ let external_netmask = fix @@ Key_gen.external_netmask () in
 let external_gateway = fix @@ Key_gen.external_gateway () in
 
 (* initialize interfaces *)
-lwt ethif1 = or_error c "primary interface" ETH.connect pri in
-lwt ethif2 = or_error c "secondary interface" ETH.connect sec in
+or_error c "primary interface" ETH.connect pri >>= fun ethif1 ->
+or_error c "secondary interface" ETH.connect sec >>= fun ethif2 ->
 
-lwt arp1 = or_error c "primary arp" A.connect ethif1 in
-lwt arp2 = or_error c "primary arp" A.connect ethif2 in
+or_error c "primary arp" A.connect ethif1 >>= fun arp1 ->
+or_error c "primary arp" A.connect ethif2 >>= fun arp2 ->
 
 (* set up ipv4 on interfaces so ARP will be answered *)
-lwt ext_i = or_error c "ip for primary interface" (I.connect ethif1) arp1 in
-lwt int_i = or_error c "ip for secondary interface" (I.connect ethif2) arp2 in
+or_error c "ip for primary interface" (I.connect ethif1) arp1 >>= fun ext_i ->
+or_error c "ip for secondary interface" (I.connect ethif2) arp2 >>= fun int_i ->
 I.set_ip ext_i external_ip >>= fun () ->
 I.set_ip_netmask ext_i external_netmask >>= fun () ->
 I.set_ip int_i internal_ip >>= fun () ->
