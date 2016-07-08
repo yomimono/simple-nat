@@ -43,23 +43,23 @@ module Main (C: CONSOLE) (Clock: V1.CLOCK) (Time: V1_LWT.TIME)
 
   let nat external_ip internal_ip nat_table (direction : direction)
       in_queue out_push =
-    let aux ip =
+    let rec aux frame =
       let open Mirage_nat in
       (* typical NAT logic: traffic from the internal "trusted" interface gets
          new mappings by default; traffic from other interfaces gets dropped if
          no mapping exists (which it doesn't, since we already checked) *)
-      Nat_rewrite.translate nat_table ip >>= fun f ->
+      Nat_rewrite.translate nat_table frame >>= fun f ->
       match direction, f with
       | Destination, Untranslated -> 
         Lwt.return_unit (* nothing in the table, drop it *)
-      | _, Translated ->
-        return (out_push (Some ip))
+      | _, (Translated dst) ->
+        return (out_push (Some (dst, frame)))
       | Source, Untranslated ->
         (* mutate nat_table to include entries for the frame *)
         allow_nat_traffic nat_table frame external_ip >>= function
         | Some () ->
           (* try rewriting again; we should now have an entry for this packet *)
-          aux ip
+          aux frame
         | None ->
           (* this frame is hopeless! *)
           return_unit
@@ -69,16 +69,20 @@ module Main (C: CONSOLE) (Clock: V1.CLOCK) (Time: V1_LWT.TIME)
     in
     process ()
 
-let send_packets c nf i (out_queue : Cstruct.t Lwt_stream.t) =
-  let aux frame =
-    match Nat_decompose.decompose frame with
-    | None -> raise (Invalid_argument "NAT transformation rendered packet unparseable")
-    | Some ip_packet ->
-      let dst = Wire_structs.Ipv4_wire.get_ipv4_dst in
-      A.query a dst >>= function
-      | None -> return_unit
-      | Some dst ->
-      Eth.output ~dst ~proto:`IPv4 ip_packet
+let send_packets c nf a (out_queue : (Ipaddr.t * Cstruct.t) Lwt_stream.t) =
+  let aux (dst, frame) =
+    match dst with
+      | (Ipaddr.V6 _) -> (* TODO: log this *) Lwt.return_unit
+      | (Ipaddr.V4 dst) ->
+        let ethertype = Ethif_wire.IPv4 in
+        A.query a dst >>= function
+        | `Timeout -> return_unit
+        | `Ok dst ->
+          (* rewrite ethernet header *)
+          let ethif_header = Ethif_packet.({source = (PRI.mac nf); destination = dst; ethertype}) in
+          match Ethif_packet.Marshal.into_cstruct ethif_header frame with
+          | Result.Ok () -> PRI.write nf frame
+          | Result.Error s -> (* TODO: log this *) Lwt.return_unit
   in
   let rec process () =
     Lwt_stream.next out_queue >>= aux >>= process
@@ -97,7 +101,7 @@ let or_error c name fn t =
   fn t
   >>= function
   | `Error e -> fail (Failure ("error starting " ^ name))
-  | `Ok t -> C.log_s c (Printf.sprintf "%s connected." name) >>
+  | `Ok t -> C.log_s c (Printf.sprintf "%s connected." name) >>= fun () ->
     return t
 in
 
@@ -148,8 +152,8 @@ Nat_rewrite.empty () >>= fun nat_t ->
     (nat (Ipaddr.V4 external_ip) (Ipaddr.V4 internal_ip) nat_t Destination pri_in_queue sec_out_push);
 
     (* packet output *)
-    (send_packets c pri ext_i pri_out_queue);
-    (send_packets c sec int_i sec_out_queue)
+    (send_packets c pri arp1 pri_out_queue);
+    (send_packets c sec arp2 sec_out_queue)
   ]
 
 end
